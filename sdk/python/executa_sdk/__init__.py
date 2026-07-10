@@ -51,6 +51,12 @@ from .embeddings import (  # noqa: F401
     EmbeddingsError,
     METHOD_EMBEDDINGS_CREATE,
 )
+from .credentials import (  # noqa: F401
+    CredentialsClient,
+    CredentialsError,
+    METHOD_CREDENTIALS_LIST_ACCOUNTS,
+    METHOD_CREDENTIALS_GET_TOKEN,
+)
 from .context import InvokeContext  # noqa: F401
 
 __all__ = [
@@ -69,6 +75,8 @@ __all__ = [
     "UploadError",
     "EmbeddingsClient",
     "EmbeddingsError",
+    "CredentialsClient",
+    "CredentialsError",
     "InvokeContext",
     "PROTOCOL_VERSION_V1",
     "PROTOCOL_VERSION_V2",

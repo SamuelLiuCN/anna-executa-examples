@@ -1,0 +1,23 @@
+{
+  "slug": "credentials-via-executa",
+  "name": "Credentials via Executa",
+  "version": "0.2.0",
+  "executa_type": "tool",
+  "description": "Exposes list_accounts / token_info / gmail_recent tools that wrap the host credentials/listAccounts + credentials/getToken reverse-RPCs, letting the Credentials Demo app read multi-account platform authorizations — and fetch recent Gmail messages with the exchanged token — through an Executa instead of calling anna.credentials.* directly.",
+
+  "tool_id": "tool-test-credentials-via-executa-12345678",
+  "type": "python",
+  "enabled": true,
+
+  "distribution": {
+    "active": "local",
+    "profiles": {
+      "local": {
+        "type": "local",
+        "supports_protocol": true
+      }
+    }
+  },
+
+  "_comment": "Dev-path locator only (`active: local`) — this demo has no binary profile yet; add one alongside a GitHub Release when needed (see anna-app-llm-demo for the multi-profile form). This dir is the `credentials-via-executa` handle referenced by app.json#bundled_executas."
+}

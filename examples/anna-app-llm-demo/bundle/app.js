@@ -21,9 +21,9 @@ const EXECUTA_METHOD = "complete";
 
 const MODE_HINTS = {
   direct:
-    "Calls the host LLM directly from the iframe (anna.llm.complete).",
+    "Calls the host LLM directly from the iframe. Supports both anna.llm.complete (one-shot) and anna.llm.stream (token-by-token).",
   executa:
-    "Invokes the Executa, which then asks the host to sample (sampling/createMessage). Requires --real LLM bridge; mock fixtures do not serve reverse sampling.",
+    "Invokes the Executa, which then asks the host to sample (sampling/createMessage). Buffered request/response only — no streaming. Requires --real LLM bridge; mock fixtures do not serve reverse sampling.",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -192,7 +192,20 @@ function handleRunMeta(frame) {
 
 modeSel?.addEventListener("change", () => {
   modeHint.textContent = MODE_HINTS[modeSel.value] || "";
+  syncStreamVisibility();
 });
+
+// Streaming is a Direct-source-only capability — anna.llm.stream goes straight
+// to the host LLM. The Executa reverse-RPC path (tools.invoke ->
+// sampling/createMessage) is buffered, so hide the stream controls when it is
+// selected to keep the UI honest about what each source can trigger.
+function syncStreamVisibility() {
+  const show = (modeSel?.value || "direct") === "direct";
+  for (const id of ["stream-btn", "stream-hint", "stream-out"]) {
+    const el = $(id);
+    if (el) el.style.display = show ? "" : "none";
+  }
+}
 
 // Collect the editable completion parameters shared by both LLM sources.
 // Blank fields return `undefined` and are omitted from the request so the host
@@ -279,6 +292,49 @@ $("complete-btn").addEventListener("click", async () => {
   } catch (err) {
     out.textContent = "(failed)";
     showError(mode === "executa" ? "tools.invoke" : "llm.complete", err);
+  }
+});
+
+// Streaming variant — anna.llm.stream returns an async iterable of frames.
+// `model_token` frames carry incremental text; the terminal `complete` frame
+// mirrors the anna.llm.complete response (role/content/model/usage). Always
+// the direct host LLM — the Executa source has no streaming surface.
+const streamOut = $("stream-out");
+
+$("stream-btn").addEventListener("click", async () => {
+  clearError();
+  streamOut.textContent = "(streaming llm.stream…)\n";
+  try {
+    const anna = await annaReady;
+    const p = readCompletionParams();
+    const prompt = $("complete-input").value || "hi";
+    const req = {
+      messages: [{ role: "user", content: { type: "text", text: prompt } }],
+      maxTokens: p.maxTokens,
+    };
+    if (p.systemPrompt) req.systemPrompt = p.systemPrompt;
+    if (p.temperature !== undefined) req.temperature = p.temperature;
+    if (p.stop) req.stopSequences = p.stop;
+    const modelPreferences = buildModelPreferences(p);
+    if (modelPreferences) req.modelPreferences = modelPreferences;
+
+    let text = "";
+    const stream = anna.llm.stream(req);
+    for await (const frame of stream) {
+      if (frame.event === "model_token" && frame.text) {
+        text += frame.text;
+        streamOut.textContent = text;
+      } else if (frame.event === "complete") {
+        streamOut.textContent =
+          text + "\n\n" + JSON.stringify(frame, null, 2);
+      } else if (frame.event === "error") {
+        throw new Error(frame.message || "stream error");
+      }
+    }
+    streamOut.textContent += "\n(done)";
+  } catch (err) {
+    streamOut.textContent += "\n(failed)";
+    showError("llm.stream", err);
   }
 });
 
@@ -614,6 +670,7 @@ $("list-btn").addEventListener("click", async () => {
 // ──────────────────────────────────────────────────────────
 // Init hint text to match the default selections.
 if (modeHint) modeHint.textContent = MODE_HINTS[modeSel?.value || "direct"] || "";
+syncStreamVisibility();
 if (transportHint)
   transportHint.textContent = TRANSPORT_HINTS[transportSel?.value || "host"] || "";
 // Reflect the (empty) uuid box into button/disabled state on load.

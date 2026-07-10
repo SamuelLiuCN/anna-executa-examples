@@ -236,7 +236,7 @@ When a session is past its deadline the call rejects with a stable
   { "tool_id": "bundled:llm-via-executa", "min_version": "0.1.0", "version": "latest" }
 ],
 "host_api": {
-  "llm":    ["complete"],
+  "llm":    ["complete", "stream"],
   "chat":   ["write_message"],
   "window": ["set_title"]
 }
