@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Credentials Demo</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>anna-app Credentials Demo</h1>
+      <p class="muted">
+        Exercises the <strong>multi-account unified-authorizations</strong>
+        surface over both transports:
+        <code>anna.credentials.list_accounts</code> /
+        <code>anna.credentials.get_token</code> called directly from this
+        window (<strong>HOST API</strong>), and
+        <code>anna.tools.invoke</code> against a bundled Executa that calls
+        <code>credentials/listAccounts</code> +
+        <code>credentials/getToken</code> back to the host
+        (<strong>Reverse RPC</strong>). Tokens are always shown masked.
+      </p>
+    </header>
+
+    <section>
+      <h2>1. Transport &amp; provider</h2>
+      <div class="mode-row">
+        <label for="transport">Transport:</label>
+        <select id="transport">
+          <option value="host" selected>HOST API — anna.credentials.* (iframe → host)</option>
+          <option value="executa">Reverse RPC — anna.tools.invoke → credentials/* (plugin → host)</option>
+        </select>
+      </div>
+      <p class="muted mode-hint" id="transport-hint"></p>
+      <div class="mode-row">
+        <label for="provider">Provider:</label>
+        <input id="provider" value="google" />
+      </div>
+    </section>
+
+    <section>
+      <h2>2. List accounts (metadata only)</h2>
+      <button id="btn-list">List accounts</button>
+      <div id="accounts" class="account-list"></div>
+      <pre id="list-out" class="out"></pre>
+    </section>
+
+    <section>
+      <h2>3. Get token (short-lived, masked)</h2>
+      <div class="mode-row">
+        <label for="account-id">account_id:</label>
+        <input id="account-id" placeholder="(empty = default account)" />
+      </div>
+      <button id="btn-token">Get token</button>
+      <pre id="token-out" class="out"></pre>
+    </section>
+
+    <section>
+      <h2>4. Gmail — recent messages</h2>
+      <p class="muted">
+        Consumes the token from step 3's machinery: <strong>HOST API</strong>
+        fetches <code>gmail.googleapis.com</code> directly from this iframe
+        (allowed via <code>ui.bundle.external_origins</code>);
+        <strong>Reverse RPC</strong> invokes the Executa's
+        <code>gmail_recent</code> tool, which calls the Gmail API server-side.
+        Requires the account's Google authorization to include the
+        <code>gmail.readonly</code> scope. Metadata only — From / Subject /
+        Date / snippet.
+      </p>
+      <div class="mode-row">
+        <label for="gmail-max">max_results:</label>
+        <input id="gmail-max" type="number" min="1" max="10" value="5" />
+      </div>
+      <button id="btn-gmail">Fetch recent emails</button>
+      <div id="gmail-list" class="mail-list"></div>
+      <pre id="gmail-out" class="out"></pre>
+    </section>
+
+    <section>
+      <h2>5. Injected default credential (Reverse RPC only)</h2>
+      <p class="muted">
+        Compares the classic startup-injection path
+        (<code>params.context.credentials.GOOGLE_ACCESS_TOKEN</code> = default
+        account) with the on-demand <code>getToken</code> path above.
+      </p>
+      <button id="btn-injected">Inspect injected credential</button>
+      <pre id="injected-out" class="out"></pre>
+    </section>
+
+    <div id="errors" class="errors hidden"></div>
+
+    <!-- publish/dev-generated sidecar: maps bundled handles → minted tool_ids.
+         MUST load before the module script below. -->
+    <script src="anna-tool-ids.js"></script>
+    <script src="app.js" type="module"></script>
+  </body>
+</html>

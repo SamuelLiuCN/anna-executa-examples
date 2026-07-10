@@ -1,0 +1,14 @@
+{
+  "name": "anna-app-credentials-demo",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Anna App exercising multi-account platform credentials over anna.credentials.* (HOST API) and credentials/* (Reverse RPC via bundled Executa).",
+  "scripts": {
+    "dev:mock": "anna-app dev --mock-llm fixtures/happy-path.jsonl",
+    "dev:real": "anna-app dev",
+    "validate": "anna-app validate"
+  },
+  "devDependencies": {
+    "@anna-ai/cli": "^0.1.35"
+  }
+}

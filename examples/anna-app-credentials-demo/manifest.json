@@ -1,0 +1,48 @@
+{
+  "schema": 2,
+  "permissions": [
+    "tools.invoke"
+  ],
+  "required_executas": [
+    {
+      "tool_id": "bundled:credentials-via-executa",
+      "min_version": "0.2.0",
+      "version": "latest"
+    }
+  ],
+  "optional_executas": [],
+  "system_prompt_addendum": "The user has the Credentials Demo app open. It demonstrates the multi-account unified-authorizations surface: the window lists the user's authorized Google accounts and fetches short-lived access tokens either directly (anna.credentials.*) or through the bundled credentials-via-executa Executa (credentials/listAccounts + credentials/getToken reverse-RPC). Its `token_info` and `gmail_recent` tools are multi_account-aware — pass `account` to target a specific account. `gmail_recent` fetches the user's most recent Gmail message headers (metadata only) using an on-demand token. Tokens shown in the UI are masked. You do not need to summon any windows.",
+  "tags": ["demo", "credentials", "multi-account", "oauth", "gmail", "executa"],
+  "ui": {
+    "bundle": {
+      "format": "static-spa",
+      "entry": "index.html",
+      "external_origins": ["https://gmail.googleapis.com"]
+    },
+    "views": [
+      {
+        "name": "main",
+        "title": "Credentials Demo",
+        "default": true,
+        "entry": "index.html",
+        "min_size": { "w": 460, "h": 560 },
+        "default_size": { "w": 600, "h": 720 },
+        "resizable": true,
+        "movable": true,
+        "single_instance": true
+      }
+    ],
+    "host_api": {
+      "credentials": ["google"],
+      "window": ["set_title"]
+    },
+    "csp_overrides": {
+      "script-src": ["'self'"]
+    },
+    "state_merge": "last_writer_wins"
+  },
+  "dev": {
+    "fixtures": ["fixtures/*.jsonl"],
+    "user_id": 1
+  }
+}

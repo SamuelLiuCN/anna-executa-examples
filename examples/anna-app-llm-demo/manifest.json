@@ -34,7 +34,7 @@
       }
     ],
     "host_api": {
-      "llm": ["complete"],
+      "llm": ["complete", "stream"],
       "chat": ["write_message"],
       "window": ["set_title"],
       "agent": {

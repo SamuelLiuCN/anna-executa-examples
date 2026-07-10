@@ -32,8 +32,8 @@
       <div class="mode-row">
         <label for="llm-mode">LLM source:</label>
         <select id="llm-mode">
-          <option value="direct" selected>Direct — anna.llm.complete</option>
-          <option value="executa">Via Executa — anna.tools.invoke → sampling/createMessage</option>
+          <option value="direct" selected>Direct — anna.llm.complete / anna.llm.stream (host LLM, supports streaming)</option>
+          <option value="executa">Via Executa — anna.tools.invoke → sampling/createMessage (buffered, no streaming)</option>
         </select>
       </div>
       <p class="muted mode-hint" id="mode-hint">
@@ -95,7 +95,16 @@
       </details>
 
       <button id="complete-btn">Run completion</button>
+      <button id="stream-btn">Stream completion</button>
       <pre id="complete-out" class="out">(no output yet)</pre>
+      <p class="muted" id="stream-hint">
+        <strong>Streaming</strong> uses <code>anna.llm.stream</code> — the host
+        emits <code>model_token</code> frames as the model generates, then a
+        terminal <code>complete</code> frame. Only available for the
+        <strong>Direct</strong> source; the Executa reverse-RPC path does not
+        stream.
+      </p>
+      <pre id="stream-out" class="out">(no output yet)</pre>
     </section>
 
     <section>
