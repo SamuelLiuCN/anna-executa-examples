@@ -5,10 +5,7 @@
     "chat.write_message",
     "storage.read",
     "storage.write",
-    "ui.svg",
-    "llm.image",
-    "llm.image.edit",
-    "host.upload"
+    "ui.svg"
   ],
   "host_capabilities": [
     "aps.kv",
@@ -19,7 +16,12 @@
     "host.upload"
   ],
   "required_executas": [],
-  "optional_executas": [],
+  "optional_executas": [
+    {
+      "tool_id": "bundled:image-poster",
+      "version": "latest"
+    }
+  ],
   "system_prompt_addendum": "The user has the Visual Brand app open. Treat the host-mediated image services (anna.image.generate / anna.image.edit) and the host upload services (anna.upload.inline / anna.upload.negotiate / anna.upload.confirm) as the source of truth for any image the user is iterating on inside this window. Do not invent image URLs; only reference URLs that were actually returned by one of those RPCs. When the user asks for variations, prefer anna.image.edit on the most recent generation to preserve composition.",
   "user_message_prefix_template": "[Visual Brand] {user_message}",
   "tags": ["design", "image", "brand", "upload", "anna-app"],
@@ -45,7 +47,7 @@
       }
     ],
     "host_api": {
-      "tools": [],
+      "tools": ["optional:bundled:image-poster"],
       "chat": ["write_message"],
       "artifact": [],
       "llm": ["complete"],
@@ -59,7 +61,6 @@
     "csp_overrides": {
       "img-src": ["'self'", "data:", "blob:", "https:"],
       "font-src": ["'self'", "data:"],
-      "style-src": ["'self'", "'unsafe-inline'"],
       "script-src": ["'self'"],
       "connect-src": ["'self'"]
     },

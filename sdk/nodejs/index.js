@@ -13,6 +13,7 @@ const sampling = require("./sampling");
 const storage = require("./storage");
 const image = require("./image");
 const hostUpload = require("./host_upload");
+const web = require("./web");
 const context = require("./context");
 
 module.exports = {
@@ -20,5 +21,6 @@ module.exports = {
   ...storage,
   ...image,
   ...hostUpload,
+  ...web,
   ...context,
 };

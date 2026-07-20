@@ -108,6 +108,7 @@ class AgentSession:
         recursion_limit: int = 8,
         run_id: Optional[str] = None,
         system_prompt: Optional[str] = None,
+        model_preferences: Optional[dict] = None,
         timeout: float = 300.0,
     ) -> AsyncIterator[dict]:
         """Run one agent turn and yield each SSE frame from the host.
@@ -121,6 +122,13 @@ class AgentSession:
         ``system_prompt`` (optional) overrides the session-level system
         prompt for **this turn only**; it does not change the stored
         session value. Subject to the platform safety floor.
+
+        ``model_preferences`` (optional) is the MCP-shaped
+        ``{"hints": [{"name": ...}], "costPriority": ..., ...}`` dict,
+        applied to **this turn only**. It is a *soft* preference: the
+        host substring-matches hints against its active models and falls
+        back to the user's saved model when nothing matches — it never
+        fails the run. Same semantics as ``sampling/createMessage``.
         """
         if self._client is None:
             raise RuntimeError("AgentSession was not created via AgentSessionClient")
@@ -133,6 +141,8 @@ class AgentSession:
         }
         if system_prompt is not None:
             body["systemPrompt"] = system_prompt
+        if model_preferences:
+            body["modelPreferences"] = model_preferences
         result = await self._client._call(
             METHOD_AGENT_SESSION_RUN,
             body,

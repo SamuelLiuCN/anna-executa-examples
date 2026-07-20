@@ -90,11 +90,24 @@ class ImageClient {
    * Generate `n` images from a text `prompt`.
    * Resolves to `{ images: [{url, mimeType, ...}], model, quota_used }`.
    *
+   * Advanced options (host validates; unsupported models silently ignore
+   * them — no extra charge in that case):
+   * - `quality`: "low"|"medium"|"high" (GPT-Image family; affects cost)
+   * - `resolution`: "0.5K"|"1K"|"2K"|"4K" (Nano-Banana family; 0.75x/1x/1.5x/2x rate)
+   * - `output_format`: "png"|"jpeg"|"webp"
+   * - `enable_web_search`: boolean (Nano Banana 2; small surcharge)
+   * - `thinking_level`: "minimal"|"high" (Nano Banana 2; "high" adds surcharge)
+   *
    * @param {{
    *   prompt: string,
    *   n?: number,                        // default 1
    *   size?: string,                     // e.g. "1024x1024"
    *   reference_image_urls?: string[],   // for img2img-style hint
+   *   quality?: string,
+   *   resolution?: string,
+   *   output_format?: string,
+   *   enable_web_search?: boolean,
+   *   thinking_level?: string,
    *   modelPreferences?: object,
    *   metadata?: object,
    *   timeoutMs?: number,                // default 120_000
@@ -106,6 +119,11 @@ class ImageClient {
       n = 1,
       size,
       reference_image_urls,
+      quality,
+      resolution,
+      output_format,
+      enable_web_search,
+      thinking_level,
       modelPreferences,
       metadata,
       timeoutMs = 120_000,
@@ -114,6 +132,12 @@ class ImageClient {
     if (size != null) params.size = size;
     if (reference_image_urls != null)
       params.reference_image_urls = reference_image_urls;
+    if (quality != null) params.quality = quality;
+    if (resolution != null) params.resolution = resolution;
+    if (output_format != null) params.output_format = output_format;
+    if (enable_web_search != null)
+      params.enable_web_search = Boolean(enable_web_search);
+    if (thinking_level != null) params.thinking_level = thinking_level;
     if (modelPreferences != null) params.modelPreferences = modelPreferences;
     if (metadata != null) params.metadata = metadata;
     return this._call(METHOD_IMAGE_GENERATE, params, timeoutMs);
@@ -121,7 +145,8 @@ class ImageClient {
 
   /**
    * Edit a source image. `mask_url` is optional; without it the provider
-   * does a whole-image edit, with it only masked pixels change.
+   * does a whole-image edit, with it only masked pixels change (requires
+   * a mask-capable model such as GPT Image 2 — otherwise -32312).
    *
    * Resolves to `{ images: […], model, quota_used }`.
    * Codes -32311/-32312 indicate provider does not support edit / masking.
@@ -132,6 +157,9 @@ class ImageClient {
    *   mask_url?: string,
    *   n?: number,
    *   size?: string,
+   *   quality?: string,
+   *   resolution?: string,
+   *   output_format?: string,
    *   modelPreferences?: object,
    *   metadata?: object,
    *   timeoutMs?: number,
@@ -144,6 +172,9 @@ class ImageClient {
       mask_url,
       n = 1,
       size,
+      quality,
+      resolution,
+      output_format,
       modelPreferences,
       metadata,
       timeoutMs = 120_000,
@@ -151,6 +182,9 @@ class ImageClient {
     const params = { image_url, prompt, n: Number(n) };
     if (mask_url != null) params.mask_url = mask_url;
     if (size != null) params.size = size;
+    if (quality != null) params.quality = quality;
+    if (resolution != null) params.resolution = resolution;
+    if (output_format != null) params.output_format = output_format;
     if (modelPreferences != null) params.modelPreferences = modelPreferences;
     if (metadata != null) params.metadata = metadata;
     return this._call(METHOD_IMAGE_EDIT, params, timeoutMs);

@@ -62,6 +62,34 @@ class UploadError extends Error {
   }
 }
 
+/**
+ * Backfill canonical field aliases on a `host/uploadFile` result.
+ *
+ * Older hosts emit `url` / `bytes` / `expires_in` while the SDK contract
+ * is `download_url` / `size_bytes` / `expires_at` (forum #168). Newer
+ * hosts return both sets; this makes the SDK behave identically against
+ * either. Existing fields are never overwritten.
+ */
+function normalizeUploadResult(result) {
+  if (!result || typeof result !== "object") return result;
+  if (result.url != null && result.download_url == null) {
+    result.download_url = result.url;
+  } else if (result.download_url != null && result.url == null) {
+    result.url = result.download_url;
+  }
+  if (result.bytes != null && result.size_bytes == null) {
+    result.size_bytes = result.bytes;
+  } else if (result.size_bytes != null && result.bytes == null) {
+    result.bytes = result.size_bytes;
+  }
+  if (result.expires_in != null && result.expires_at == null) {
+    result.expires_at = new Date(
+      Date.now() + Number(result.expires_in) * 1000
+    ).toISOString().replace(/\.\d{3}Z$/, "Z");
+  }
+  return result;
+}
+
 class HostUploadClient {
   constructor(opts = {}) {
     this._writeFrame =
@@ -185,7 +213,7 @@ class HostUploadClient {
         )
       );
     } else {
-      pending.resolve(msg.result || {});
+      pending.resolve(normalizeUploadResult(msg.result || {}));
     }
     return true;
   }

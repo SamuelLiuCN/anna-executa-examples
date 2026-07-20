@@ -154,10 +154,18 @@ async function runPreset(preset) {
       mime_type: SAMPLE_MIME,
       purpose: "user_artifact",
     });
+    // A "success" without a usable download URL is a contract violation —
+    // surface it as an error instead of a green ✓ (forum #168).
+    const url = res.download_url || res.url || null;
+    if (!url) {
+      throw new Error(
+        `host_upload_path returned no download_url (keys: ${Object.keys(res).join(", ")})`,
+      );
+    }
     entry.status = "done";
-    entry.url = res.download_url || null;
+    entry.url = url;
     entry.expires_at = res.expires_at || null;
-    entry.detail = `✓ ${formatSize(res.size_bytes)} · ${res.mode || "?"}`;
+    entry.detail = `✓ ${formatSize(res.size_bytes ?? res.bytes)} · ${res.mode || "?"}`;
     showStatus("host_upload_path", `${preset.label} → ${res.mode} ✓`, false);
   } catch (err) {
     entry.status = "error";

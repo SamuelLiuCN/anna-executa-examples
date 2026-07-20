@@ -29,6 +29,7 @@ import asyncio
 import json
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -61,7 +62,7 @@ from executa_sdk import (  # noqa: E402
 
 MANIFEST = {
     "display_name": "LLM via Executa",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "description": (
         "Performs an LLM completion on behalf of the calling app by "
         "asking the host to sample (sampling/createMessage)."
@@ -253,9 +254,10 @@ MANIFEST = {
                 "Drive an Anna App Session over the Reverse RPC path: the "
                 "plugin issues agent/session.* reverse-RPCs to the host. "
                 "The 'op' argument selects the operation "
-                "(create|run|cancel|history|delete|list). This mirrors the "
-                "iframe HOST API anna.agent.session.* surface so the demo "
-                "can compare both transports."
+                "(create|run|cancel|history|delete|list). op=run accepts "
+                "per-run MCP modelPreferences (model_hint + priorities). "
+                "This mirrors the iframe HOST API anna.agent.session.* "
+                "surface so the demo can compare both transports."
             ),
             "parameters": [
                 {
@@ -314,6 +316,39 @@ MANIFEST = {
                     "description": "Run id to cancel for op=cancel.",
                     "required": False,
                     "default": "",
+                },
+                {
+                    "name": "model_hint",
+                    "type": "string",
+                    "description": (
+                        "modelPreferences.hints[0].name for op=run — per-run "
+                        "soft model preference. Host substring-matches it "
+                        "against active models and falls back to the user's "
+                        "saved model on miss (never fails the run)."
+                    ),
+                    "required": False,
+                    "default": "",
+                },
+                {
+                    "name": "cost_priority",
+                    "type": "number",
+                    "description": "modelPreferences.costPriority 0.0-1.0 for op=run.",
+                    "required": False,
+                    "default": None,
+                },
+                {
+                    "name": "speed_priority",
+                    "type": "number",
+                    "description": "modelPreferences.speedPriority 0.0-1.0 for op=run.",
+                    "required": False,
+                    "default": None,
+                },
+                {
+                    "name": "intelligence_priority",
+                    "type": "number",
+                    "description": "modelPreferences.intelligencePriority 0.0-1.0 for op=run.",
+                    "required": False,
+                    "default": None,
                 },
                 {
                     "name": "include_expired",
@@ -413,6 +448,7 @@ async def _complete(
         intelligence_priority=intelligence_priority,
     )
 
+    t0 = time.perf_counter()
     result = await sampling.create_message(
         messages=[
             {
@@ -435,6 +471,10 @@ async def _complete(
         "usage": result.get("usage"),
         "stopReason": result.get("stopReason"),
         "modelPreferences": model_preferences,
+        # Plugin-measured wall time of the sampling/createMessage round-trip
+        # only (excludes tools.invoke transport overhead) — compare it with
+        # the app-measured end-to-end total to see where time is spent.
+        "elapsed_ms": round((time.perf_counter() - t0) * 1000),
     }
 
 
@@ -479,6 +519,7 @@ async def _sample_chain(
     models_used: list[str] = []
     prompt_tokens = completion_tokens = total_tokens = 0
     current = prompt.strip()
+    t0 = time.perf_counter()
 
     for i in range(steps):
         if i > 0 and delay_s > 0:
@@ -489,6 +530,7 @@ async def _sample_chain(
             if i == 0
             else f"Continue and refine the following, adding one new idea:\n\n{current}"
         )
+        step_t0 = time.perf_counter()
         result = await sampling.create_message(
             messages=[
                 {
@@ -522,6 +564,7 @@ async def _sample_chain(
                 "model": model,
                 "usage": usage,
                 "stopReason": result.get("stopReason"),
+                "elapsed_ms": round((time.perf_counter() - step_t0) * 1000),
             }
         )
         if text_out:
@@ -538,6 +581,9 @@ async def _sample_chain(
             "totalTokens": total_tokens,
         },
         "modelPreferences": model_preferences,
+        # Total wall time across all steps INCLUDING the artificial delays
+        # (per-step elapsed_ms excludes them — sum those for pure LLM time).
+        "elapsed_ms": round((time.perf_counter() - t0) * 1000),
     }
 
 
@@ -551,6 +597,10 @@ async def _agent_session(
     run_id: str = "",
     include_expired: bool = False,
     limit: int = 50,
+    model_hint: str = "",
+    cost_priority: float | None = None,
+    speed_priority: float | None = None,
+    intelligence_priority: float | None = None,
     invoke_id: str,
 ) -> dict:
     """Drive agent/session.* over the Reverse RPC path.
@@ -613,9 +663,23 @@ async def _agent_session(
     handle._client = agent_client
 
     if op == "run":
+        # Per-run MCP modelPreferences — soft preference resolved host-side
+        # with the same semantics as sampling/createMessage (hints substring
+        # match → user's saved model → default; never fails the run).
+        model_preferences = _build_model_preferences(
+            model_hint=model_hint,
+            cost_priority=cost_priority,
+            speed_priority=speed_priority,
+            intelligence_priority=intelligence_priority,
+        )
         frames: list[dict] = []
         text_chunks: list[str] = []
-        async for frame in handle.run(prompt or "hello", recursion_limit=8):
+        t0 = time.perf_counter()
+        async for frame in handle.run(
+            prompt or "hello",
+            recursion_limit=8,
+            model_preferences=model_preferences,
+        ):
             frames.append(frame)
             if frame.get("event") == "token" and frame.get("text"):
                 text_chunks.append(frame["text"])
@@ -624,6 +688,11 @@ async def _agent_session(
             "app_session_uuid": app_session_uuid,
             "text": "".join(text_chunks),
             "frames": frames,
+            "modelPreferences": model_preferences,
+            # Buffered transport: one number is all we can measure — the
+            # whole run (queue + agent loop + streaming) as seen from the
+            # plugin.
+            "elapsed_ms": round((time.perf_counter() - t0) * 1000),
         }
 
     if op == "cancel":

@@ -57,6 +57,12 @@ from .credentials import (  # noqa: F401
     METHOD_CREDENTIALS_LIST_ACCOUNTS,
     METHOD_CREDENTIALS_GET_TOKEN,
 )
+from .web import (  # noqa: F401
+    WebClient,
+    WebError,
+    METHOD_WEB_SEARCH,
+    METHOD_WEB_FETCH,
+)
 from .context import InvokeContext  # noqa: F401
 
 __all__ = [
@@ -77,6 +83,8 @@ __all__ = [
     "EmbeddingsError",
     "CredentialsClient",
     "CredentialsError",
+    "WebClient",
+    "WebError",
     "InvokeContext",
     "PROTOCOL_VERSION_V1",
     "PROTOCOL_VERSION_V2",

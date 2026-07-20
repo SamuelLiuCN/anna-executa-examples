@@ -89,6 +89,18 @@ type NegotiateResult struct {
 	Headers   map[string]string `json:"headers"`
 	R2Key     string            `json:"r2_key"`
 	ExpiresAt string            `json:"expires_at,omitempty"`
+	// ExpiresIn is the legacy relative-TTL alias (seconds) emitted by
+	// older hosts (forum #168). Prefer ExpiresAt, which normalize()
+	// backfills when only ExpiresIn is present.
+	ExpiresIn int64 `json:"expires_in,omitempty"`
+}
+
+func (r *NegotiateResult) normalize() {
+	if r.ExpiresAt == "" && r.ExpiresIn > 0 {
+		r.ExpiresAt = time.Now().UTC().
+			Add(time.Duration(r.ExpiresIn) * time.Second).
+			Format("2006-01-02T15:04:05Z")
+	}
 }
 
 // ConfirmResult is the transient download URL after PUT completes.
@@ -97,6 +109,26 @@ type ConfirmResult struct {
 	R2Key       string `json:"r2_key"`
 	SizeBytes   int64  `json:"size_bytes,omitempty"`
 	ExpiresAt   string `json:"expires_at,omitempty"`
+	// Legacy aliases emitted by older hosts (forum #168). normalize()
+	// backfills the canonical fields above from these when needed —
+	// read DownloadURL / SizeBytes / ExpiresAt.
+	URL       string `json:"url,omitempty"`
+	Bytes     int64  `json:"bytes,omitempty"`
+	ExpiresIn int64  `json:"expires_in,omitempty"`
+}
+
+func (r *ConfirmResult) normalize() {
+	if r.DownloadURL == "" {
+		r.DownloadURL = r.URL
+	}
+	if r.SizeBytes == 0 {
+		r.SizeBytes = r.Bytes
+	}
+	if r.ExpiresAt == "" && r.ExpiresIn > 0 {
+		r.ExpiresAt = time.Now().UTC().
+			Add(time.Duration(r.ExpiresIn) * time.Second).
+			Format("2006-01-02T15:04:05Z")
+	}
 }
 
 // FrameWriter writes one newline-delimited JSON-RPC frame to the host.
@@ -179,6 +211,7 @@ func (c *Client) UploadInline(req InlineRequest, timeout time.Duration) (*Confir
 	if err := c.call(MethodHostUploadFile, params, timeout, &out); err != nil {
 		return nil, err
 	}
+	out.normalize()
 	return &out, nil
 }
 
@@ -203,6 +236,7 @@ func (c *Client) Negotiate(req NegotiateRequest, timeout time.Duration) (*Negoti
 	if err := c.call(MethodHostUploadFile, params, timeout, &out); err != nil {
 		return nil, err
 	}
+	out.normalize()
 	return &out, nil
 }
 
@@ -216,6 +250,7 @@ func (c *Client) Confirm(r2Key string, timeout time.Duration) (*ConfirmResult, e
 	if err := c.call(MethodHostUploadFile, params, timeout, &out); err != nil {
 		return nil, err
 	}
+	out.normalize()
 	return &out, nil
 }
 

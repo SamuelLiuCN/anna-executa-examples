@@ -90,13 +90,25 @@ system prompt, max tokens, temperature, stop sequences, and the MCP
 `modelPreferences` (model hint + cost / speed / intelligence priority).
 Blank fields are omitted from the request, so the host applies its own
 defaults; whatever you set is forwarded on both paths (direct
-`anna.llm.complete` args and the Executa `complete` tool args). Then in
+`anna.llm.complete` args and the Executa `complete` tool args). Every
+action prints a **⏱ timing line** under its output: total round-trip,
+time-to-first-token + decode rate for streams, and — on the Executa
+paths — the plugin-measured sampling time so you can see how much of the
+total is `tools.invoke` transport overhead. Then in
 section 2 pick a **Transport** (HOST API vs Reverse RPC) and drive the
 session:
 
 1. **create** — mints an agent session (`submode: "auto"`) and drops its
    `app_session_uuid` into the editable uuid box.
-2. **run** — streams tokens into the output area.
+2. **run** — streams tokens into the output area. Expand **Per-run model
+   preferences** to send MCP `modelPreferences` with the run — applied to
+   that run only (sessions never pin a model) and forwarded on **both**
+   transports (`run({modelPreferences})` over the HOST API; flat
+   `model_hint` / `*_priority` args over the Reverse RPC, which the
+   plugin re-assembles and passes to `agent/session.run`). It is a *soft*
+   preference: the host substring-matches the hint against active models
+   and falls back to your saved model on a miss — the run never fails
+   because of it.
 3. **cancel** — cancels the most recent run (`run_id` tracked from the
    stream).
 4. **history** — fetches the recorded transcript.

@@ -1,0 +1,24 @@
+{
+  "slug": "web-search-via-executa",
+  "name": "Web Search via Executa",
+  "version": "0.2.0",
+  "executa_type": "tool",
+  "description": "Demonstrates the web/search + web/fetch + web/image_search + web/image_fetch reverse-RPCs — the host owns provider keys, SSRF guarding, quota and billing; the plugin just asks. Backed by the web.search / web.fetch / web.image_search / web.image_fetch capabilities.",
+
+  "tool_id": "tool-test-web-search-12345678",
+  "type": "python",
+  "enabled": true,
+
+  "distribution": {
+    "active": "local",
+    "profiles": {
+      "local": {
+        "type": "local",
+        "supports_protocol": true,
+        "capabilities": ["web_search", "web_research", "web_image_search", "web_image_grab"]
+      }
+    }
+  },
+
+  "_comment": "Publish metadata (slug/name/version/executa_type) is read by `anna-app apps publish`; the dev fields (tool_id/type/enabled) are read by `anna-app dev`. This dir is the `web-search-via-executa` handle referenced by app.json#bundled_executas. Only a `local` distribution profile is declared — add a `binary` profile (PyInstaller + GitHub Release URLs, see the file-upload demo for the shape) before shipping to users whose agents can't run `uvx`. web/* needs `anna-app dev` signed in; the dev install seeds a fully-enabled web_grant so no manual Permissions toggling is needed in dev."
+}

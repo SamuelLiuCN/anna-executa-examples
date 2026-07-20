@@ -52,6 +52,7 @@ import base64
 import threading
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Optional
 
 from .sampling import _write_frame
@@ -87,6 +88,33 @@ class UploadError(Exception):
         self.code = code
         self.message = message
         self.data = data or {}
+
+
+def _normalize_result(result: dict) -> dict:
+    """Backfill canonical field aliases on a ``host/uploadFile`` result.
+
+    Older hosts emit ``url`` / ``bytes`` / ``expires_in`` while the SDK
+    contract is ``download_url`` / ``size_bytes`` / ``expires_at``
+    (forum #168). Newer hosts return both sets; this makes the SDK
+    behave identically against either. Existing fields are never
+    overwritten.
+    """
+    if not isinstance(result, dict):
+        return result
+    if "url" in result and "download_url" not in result:
+        result["download_url"] = result["url"]
+    elif "download_url" in result and "url" not in result:
+        result["url"] = result["download_url"]
+    if "bytes" in result and "size_bytes" not in result:
+        result["size_bytes"] = result["bytes"]
+    elif "size_bytes" in result and "bytes" not in result:
+        result["bytes"] = result["size_bytes"]
+    if "expires_in" in result and "expires_at" not in result:
+        dt = datetime.now(timezone.utc) + timedelta(
+            seconds=int(result["expires_in"])
+        )
+        result["expires_at"] = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return result
 
 
 # ─── Internal plumbing ────────────────────────────────────────────────
@@ -297,7 +325,7 @@ class HostUploadClient:
             raise
 
         try:
-            return await asyncio.wait_for(future, timeout=timeout)
+            return _normalize_result(await asyncio.wait_for(future, timeout=timeout))
         except asyncio.TimeoutError:
             with self._lock:
                 self._pending.pop(req_id, None)

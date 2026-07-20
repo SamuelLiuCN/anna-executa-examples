@@ -30,6 +30,19 @@
 
 import { AnnaAppRuntime } from "/static/anna-apps/_sdk/latest/index.js";
 
+// ─── bundled image-poster executa (Reverse RPC path) ─────────────────
+// `anna-app apps push/publish` publishes ./executas/image-poster and writes
+// bundle/anna-tool-ids.js (loaded just before this file) which sets
+// window.__ANNA_TOOL_IDS__ = { "image-poster": "<minted-id>" }.
+// The hardcoded fallback is only used by local `anna-app dev`, where the
+// dev placeholder id from executas/image-poster/executa.json is live.
+const DEV_FALLBACK_TOOL_ID = "tool-dev-image-poster";
+const POSTER_TOOL_ID =
+  (typeof window !== "undefined"
+    && window.__ANNA_TOOL_IDS__
+    && window.__ANNA_TOOL_IDS__["image-poster"])
+  || DEV_FALLBACK_TOOL_ID;
+
 const STORAGE_KEY_PROMPT = "visual-brand:last-prompt";
 const STORAGE_KEY_STYLE = "visual-brand:last-style";
 const MAX_HISTORY = 6;
@@ -85,6 +98,12 @@ async function onGenerate() {
   const prompt = (document.getElementById("prompt").value || "").trim();
   const style = document.getElementById("style").value;
   const size = document.getElementById("size").value;
+  // Advanced provider options (v0.14+): validated host-side; models that
+  // don't support an option simply ignore it (and are not surcharged).
+  //   quality    — low|medium|high, GPT-Image-family only, drives cost
+  //   resolution — 0.5K|1K|2K|4K, Nano-Banana-family, 0.75x/1x/1.5x/2x rate
+  const quality = document.getElementById("quality").value || undefined;
+  const resolution = document.getElementById("resolution").value || undefined;
   if (!prompt) return setStatus("Prompt is empty.", "warn");
 
   setStatus("Generating…", "info");
@@ -94,6 +113,9 @@ async function onGenerate() {
       prompt: `A ${style} poster: ${prompt}. High contrast, bold typography, single focal subject.`,
       n: 1,
       size,
+      quality,
+      resolution,
+      output_format: "png",
       metadata: { source: "visual-brand", style },
     });
     setCurrent({ ...out.images?.[0], model: out.model, prompt, style });
@@ -111,15 +133,32 @@ async function onGenerate() {
 async function onRestyle() {
   if (!anna || !state.current) return;
   const style = document.getElementById("style").value;
+  const quality = document.getElementById("quality").value || undefined;
+  const model = document.getElementById("model").value;
   setStatus("Restyling…", "info");
   toggleButtons(true);
   try {
-    const out = await anna.image.edit({
-      image_url: state.current.url,
-      prompt: `Restyle this poster in a ${style} aesthetic. Preserve composition.`,
-      n: 1,
-      metadata: { source: "visual-brand", style, op: "restyle" },
-    });
+    let out;
+    if (currentPath() === "rpc") {
+      out = await anna.tools.invoke({
+        tool_id: POSTER_TOOL_ID,
+        method: "poster_restyle",
+        args: { image_url: state.current.url, style, model },
+        timeoutMs: 240000,
+      });
+    } else {
+      out = await anna.image.edit({
+        image_url: state.current.url,
+        prompt: `Restyle this poster in a ${style} aesthetic. Preserve composition.`,
+        n: 1,
+        quality,
+        modelPreferences: currentModelPrefs(),
+        // mask_url is also supported here for region-scoped inpainting when
+        // the routed model supports masking (e.g. GPT Image 2); models
+        // without mask support reject with APP_INVALID_REQUEST/-32312.
+        metadata: { source: "visual-brand", style, op: "restyle" },
+      });
+    }
     setCurrent({ ...out.images?.[0], model: out.model, prompt: state.current.prompt, style });
     setStatus("Restyled.", "ok");
   } catch (e) {

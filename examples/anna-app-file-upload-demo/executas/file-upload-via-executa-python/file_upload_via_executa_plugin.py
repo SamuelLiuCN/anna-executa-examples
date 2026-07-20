@@ -271,13 +271,21 @@ async def _host_upload_path(
         res = await _host_upload.confirm(r2_key=info["r2_key"])
         mode = "negotiate+confirm"
 
+    # Read with legacy-alias fallbacks (url/bytes/expires_in) so the demo
+    # works against hosts from before the field alignment (forum #168).
+    download_url = res.get("download_url") or res.get("url")
+    if not download_url:
+        raise RuntimeError(
+            "host/uploadFile returned no download_url/url — "
+            f"result keys: {sorted(res.keys())}"
+        )
     return {
         "ok": True,
         "mode": mode,
         "filename": name,
-        "size_bytes": res.get("size_bytes", size),
+        "size_bytes": res.get("size_bytes") or res.get("bytes") or size,
         "mime_type": mime,
-        "download_url": res.get("download_url"),
+        "download_url": download_url,
         "r2_key": res.get("r2_key"),
         "expires_at": res.get("expires_at"),
     }

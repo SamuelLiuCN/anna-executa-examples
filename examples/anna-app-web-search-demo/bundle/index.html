@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Web Search Demo</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>anna-app Web Search Demo</h1>
+      <p class="muted">
+        Demonstrates Anna's host-managed <strong>web capability</strong> over
+        <strong>both channels</strong> &mdash; the iframe HOST API
+        (<code>anna.web.search</code> / <code>anna.web.fetch</code>) and the
+        Reverse RPC twin (<code>web/search</code> from a bundled Executa). See
+        the
+        <a
+          href="https://anna.partners/developers/reference"
+          target="_blank"
+          rel="noopener noreferrer"
+          >host docs (Host API &middot; web.*)</a
+        >.
+      </p>
+      <ul class="muted modes">
+        <li>
+          <strong>Provider keys never leave the host.</strong> Routing
+          (tavily &rarr; ddgs degrade chain), SSRF guarding, quota, billing and
+          audit are all host-side; results are provider-agnostic.
+          <code>search_depth</code> is a <em>quality intent</em> &mdash; the
+          response reports the actually-executed <code>provider_tier</code>
+          and bills the cheaper rate on degrade.
+        </li>
+        <li>
+          <strong>HOST API</strong> &mdash; the iframe calls
+          <code>anna.web.search</code> directly over postMessage. Gated by
+          <code>ui.host_api.web</code> + the per-app <code>web_grant</code>.
+        </li>
+        <li>
+          <strong>Reverse RPC</strong> &mdash; the bundled Executa issues
+          <code>web/search</code> / <code>web/fetch</code> JSON-RPC server
+          requests via its host agent. Gated by
+          <code>host_capabilities: ["web.search", "web.fetch"]</code> + the
+          per-executa <code>web_grant</code>. stdio budgets are tighter
+          (8,000&nbsp;chars/page, 256&nbsp;KB/response).
+        </li>
+      </ul>
+      <p class="muted note">
+        Run with <code>anna-app dev</code> while <strong>signed in</strong>.
+        The dev install seeds a fully-enabled <code>web_grant</code> on both
+        the app and the bundled Executa (dev calls are never billed). In
+        production the first <code>web.*</code> call returns
+        <code>APP_NOT_GRANTED</code> until the user enables Web access in the
+        app's permission card.
+      </p>
+    </header>
+
+    <section>
+      <h2>1. Search &mdash; both channels, one wire contract</h2>
+      <label class="muted" for="query-input">Query</label>
+      <input
+        id="query-input"
+        type="text"
+        value="Anna AI platform"
+        placeholder="e.g. latest WebGPU news"
+      />
+      <div class="row">
+        <label class="muted" for="topic-select">Topic</label>
+        <select id="topic-select">
+          <option value="general" selected>general</option>
+          <option value="news">news</option>
+        </select>
+        <label class="muted" for="range-select">Time range</label>
+        <select id="range-select">
+          <option value="" selected>any</option>
+          <option value="day">day</option>
+          <option value="week">week</option>
+          <option value="month">month</option>
+          <option value="year">year</option>
+        </select>
+      </div>
+      <div class="row">
+        <button id="host-search-btn">Search via HOST API</button>
+        <button id="rpc-search-btn" class="secondary">
+          Search via Reverse RPC (Executa)
+        </button>
+        <button id="both-search-btn" class="secondary">Run both</button>
+      </div>
+      <div class="compare">
+        <div class="channel">
+          <h3>HOST API <span class="muted" id="host-meta"></span></h3>
+          <ul id="host-results" class="file-list"></ul>
+        </div>
+        <div class="channel">
+          <h3>Reverse RPC <span class="muted" id="rpc-meta"></span></h3>
+          <ul id="rpc-results" class="file-list"></ul>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>2. Fetch a page (HOST API, SSRF-guarded)</h2>
+      <p class="muted">
+        Extracts the main content to Markdown via <code>anna.web.fetch</code>
+        &mdash; navigation/ads stripped, per-item failure isolation. Click
+        <em>fetch</em> next to any search result above, or paste a URL. Try
+        <code>http://169.254.169.254/</code> to watch the SSRF guard answer
+        <code>SSRF_BLOCKED</code> without failing the call.
+      </p>
+      <label class="muted" for="url-input">URL</label>
+      <input
+        id="url-input"
+        type="text"
+        placeholder="https://example.com/article"
+      />
+      <div class="row">
+        <button id="fetch-btn">Fetch via HOST API</button>
+      </div>
+      <pre id="fetch-out" class="out">(no page fetched yet)</pre>
+    </section>
+
+    <section>
+      <h2>3. Research pipeline (Reverse RPC)</h2>
+      <p class="muted">
+        One <code>tools.invoke(web_research)</code> &rarr; the Executa chains
+        <code>web/search</code> + <code>web/fetch</code> host-side and returns
+        extracted content for the top results. Usage is metered by the user's
+        CU pool (no per-invoke call cap).
+      </p>
+      <div class="row">
+        <button id="research-btn">Research current query</button>
+      </div>
+      <pre id="research-out" class="out">(no research run yet)</pre>
+    </section>
+
+    <section>
+      <h2>4. Image search (Phase 2) &mdash; both channels</h2>
+      <p class="muted">
+        <code>anna.web.image_search</code> (HOST API) and
+        <code>tools.invoke(web_image_search)</code> (Reverse RPC) share the
+        same wire contract. Safe-search is <strong>force-enabled
+        host-side</strong>; <code>license_hint</code> is best-effort &mdash;
+        the platform makes no copyright warranty. Requires
+        <code>web_grant.allowImageSearch</code> (defaults OFF in production;
+        the dev install seeds it on).
+      </p>
+      <label class="muted" for="image-query-input">Image query</label>
+      <input
+        id="image-query-input"
+        type="text"
+        value="aurora borealis"
+        placeholder="e.g. golden gate bridge at dusk"
+      />
+      <div class="row">
+        <label class="muted" for="aspect-select">Aspect</label>
+        <select id="aspect-select">
+          <option value="any" selected>any</option>
+          <option value="wide">wide</option>
+          <option value="tall">tall</option>
+          <option value="square">square</option>
+        </select>
+        <button id="host-image-search-btn">Search via HOST API</button>
+        <button id="rpc-image-search-btn" class="secondary">
+          Search via Reverse RPC (Executa)
+        </button>
+      </div>
+      <p class="muted" id="image-meta"></p>
+      <div id="image-results" class="image-grid"></div>
+    </section>
+
+    <section>
+      <h2>5. Image download &rarr; APS artifact (Phase 2)</h2>
+      <p class="muted">
+        <code>anna.web.image_fetch</code> downloads the image
+        <strong>host-side</strong> (SSRF-guarded, MIME whitelist + magic-byte
+        sniffing) into the app's APS file storage &mdash; the response is an
+        artifact <em>reference</em> (<code>path</code> + short-lived
+        <code>get_url</code>), never bytes. The stored object counts against
+        your storage quota. Click <em>grab</em> on any image result above, or
+        paste an image URL. Requires <code>web_grant.allowImageFetch</code>
+        (defaults OFF in production).
+      </p>
+      <label class="muted" for="image-url-input">Image URL</label>
+      <input
+        id="image-url-input"
+        type="text"
+        placeholder="https://example.com/photo.jpg"
+      />
+      <div class="row">
+        <button id="image-fetch-btn">Download via HOST API</button>
+      </div>
+      <div id="image-fetch-preview" class="image-fetch-preview"></div>
+      <pre id="image-fetch-out" class="out">(no image downloaded yet)</pre>
+    </section>
+
+    <section>
+      <h2>Status</h2>
+      <pre id="status" class="out">(idle)</pre>
+      <details>
+        <summary class="muted">raw responses</summary>
+        <pre id="raw" class="out">(no output yet)</pre>
+      </details>
+    </section>
+
+    <!-- Resolved bundled-executa tool_ids: window.__ANNA_TOOL_IDS__.
+         Auto-generated by `anna-app dev` / `anna-app apps publish`; absent in
+         a fresh checkout (app.js then falls back to the dev tool_id). Must load
+         before app.js, hence a classic deferred script ahead of the module. -->
+    <script src="anna-tool-ids.js" defer></script>
+    <!-- app.js is a native ES module that imports the runtime SDK directly.
+         The bundle CSP is `script-src 'self' <sdk-origin>`, which blocks
+         inline scripts but allows this external module + its SDK import. -->
+    <script src="app.js" type="module"></script>
+  </body>
+</html>

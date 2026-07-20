@@ -47,12 +47,17 @@ from urllib.parse import urlparse
 from urllib.request import urlopen
 
 # Allow direct execution from a fresh checkout: fall back to the in-repo SDK.
+# Walk upward until we find `sdk/python` — this file lives at a different
+# depth depending on whether it runs from examples/python/image-poster/ or
+# as a bundled executa inside an anna-app (executas/image-poster/).
 try:
     import executa_sdk  # noqa: F401
 except ModuleNotFoundError:
-    _SDK_PATH = Path(__file__).resolve().parents[3] / "sdk" / "python"
-    if _SDK_PATH.is_dir():
-        sys.path.insert(0, str(_SDK_PATH))
+    for _parent in Path(__file__).resolve().parents:
+        _SDK_PATH = _parent / "sdk" / "python"
+        if _SDK_PATH.is_dir():
+            sys.path.insert(0, str(_SDK_PATH))
+            break
 
 from executa_sdk import (  # noqa: E402
     HostUploadClient,

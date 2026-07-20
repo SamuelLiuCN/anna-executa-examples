@@ -97,6 +97,7 @@
       <button id="complete-btn">Run completion</button>
       <button id="stream-btn">Stream completion</button>
       <pre id="complete-out" class="out">(no output yet)</pre>
+      <p class="stats" id="complete-stats"></p>
       <p class="muted" id="stream-hint">
         <strong>Streaming</strong> uses <code>anna.llm.stream</code> — the host
         emits <code>model_token</code> frames as the model generates, then a
@@ -105,6 +106,7 @@
         stream.
       </p>
       <pre id="stream-out" class="out">(no output yet)</pre>
+      <p class="stats" id="stream-stats"></p>
     </section>
 
     <section>
@@ -130,6 +132,7 @@
       <textarea id="chain-input" rows="2">Tell me one surprising fact, then keep building on it.</textarea>
       <button id="chain-btn">Run sample chain</button>
       <pre id="chain-out" class="out">(no output yet)</pre>
+      <p class="stats" id="chain-stats"></p>
     </section>
 
     <section>
@@ -170,6 +173,31 @@
       <p class="muted lifecycle" id="session-lifecycle">lifecycle: (none)</p>
       <p class="muted lifecycle" id="session-tools">tools: (unknown — run or re-create to find out)</p>
       <div id="tools-warning" class="out warn" hidden></div>
+      <details class="params">
+        <summary>Per-run model preferences (MCP <code>modelPreferences</code>)</summary>
+        <p class="muted">
+          Applied to the <strong>next run only</strong> — sessions do not pin a
+          model. This is a <em>soft</em> preference with the same host-side
+          semantics as <code>llm.complete</code> / <code>sampling</code>: the
+          hint is substring-matched against the platform's active models and
+          falls back to your saved model on a miss — it never fails the run.
+          Forwarded on <strong>both</strong> transports (HOST API
+          <code>run({modelPreferences})</code> and Reverse RPC
+          <code>agent/session.run</code>).
+        </p>
+        <div class="mode-row">
+          <label for="run-hint">Model hint:</label>
+          <input id="run-hint" type="text" class="text-input" placeholder="e.g. deepseek" />
+        </div>
+        <div class="mode-row">
+          <label for="run-cost">Cost priority:</label>
+          <input id="run-cost" type="number" min="0" max="1" step="0.1" placeholder="—" class="num-input" />
+          <label for="run-speed">Speed priority:</label>
+          <input id="run-speed" type="number" min="0" max="1" step="0.1" placeholder="—" class="num-input" />
+          <label for="run-intel">Intelligence priority:</label>
+          <input id="run-intel" type="number" min="0" max="1" step="0.1" placeholder="—" class="num-input" />
+        </div>
+      </details>
       <textarea id="run-input" rows="2">What is 12 × 13?</textarea>
       <div class="btn-row">
         <button id="run-btn" disabled>run (streamed)</button>
@@ -181,6 +209,7 @@
       </div>
       <div id="session-list" class="session-list"></div>
       <pre id="run-out" class="out">(no output yet)</pre>
+      <p class="stats" id="run-stats"></p>
     </section>
 
     <section>
