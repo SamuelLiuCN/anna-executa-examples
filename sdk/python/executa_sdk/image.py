@@ -195,15 +195,33 @@ class ImageClient:
         reference_image_urls: Optional[List[str]] = None,
         model_preferences: Optional[dict] = None,
         metadata: Optional[dict] = None,
+        quality: Optional[str] = None,
+        resolution: Optional[str] = None,
+        output_format: Optional[str] = None,
+        enable_web_search: Optional[bool] = None,
+        thinking_level: Optional[str] = None,
         timeout: float = DEFAULT_TIMEOUT,
     ) -> dict:
         """Generate ``n`` images from a text ``prompt``.
+
+        Advanced options (host validates; unsupported models silently
+        ignore them — no extra charge is billed in that case):
+
+        - ``quality``: ``"low" | "medium" | "high"`` — GPT-Image-family
+          models only; strongly affects per-image cost.
+        - ``resolution``: ``"0.5K" | "1K" | "2K" | "4K"`` — Nano-Banana-family
+          models; billed at 0.75x / 1x / 1.5x / 2x the base rate.
+        - ``output_format``: ``"png" | "jpeg" | "webp"``.
+        - ``enable_web_search``: ground the generation in live web results
+          (Nano Banana 2; small surcharge per call).
+        - ``thinking_level``: ``"minimal" | "high"`` (Nano Banana 2;
+          ``high`` adds a small surcharge).
 
         Returns the host's response dict, typically::
 
             {
               "images": [{"url": "https://r2.example.com/...", "mimeType": "image/png"}, ...],
-              "model": "dall-e-3",
+              "model": "fal-ai/nano-banana-2",
               "quota_used": {"image_count": 2},
             }
 
@@ -218,6 +236,16 @@ class ImageClient:
             params["modelPreferences"] = model_preferences
         if metadata is not None:
             params["metadata"] = metadata
+        if quality is not None:
+            params["quality"] = quality
+        if resolution is not None:
+            params["resolution"] = resolution
+        if output_format is not None:
+            params["output_format"] = output_format
+        if enable_web_search is not None:
+            params["enable_web_search"] = bool(enable_web_search)
+        if thinking_level is not None:
+            params["thinking_level"] = thinking_level
         return await self._call(METHOD_IMAGE_GENERATE, params, timeout)
 
     async def edit(
@@ -230,6 +258,9 @@ class ImageClient:
         size: Optional[str] = None,
         model_preferences: Optional[dict] = None,
         metadata: Optional[dict] = None,
+        quality: Optional[str] = None,
+        resolution: Optional[str] = None,
+        output_format: Optional[str] = None,
         timeout: float = DEFAULT_TIMEOUT,
     ) -> dict:
         """Edit a source ``image_url`` according to a text ``prompt``.
@@ -237,6 +268,11 @@ class ImageClient:
         ``mask_url`` is optional. Without it, the provider does whole-image
         edit; with it, only masked pixels change. Mask must be a 1-channel
         PNG with the same dimensions as ``image_url`` (white = edit).
+        Mask editing requires a model that supports it (e.g. GPT Image 2);
+        otherwise the host rejects with -32312.
+
+        ``quality`` / ``resolution`` / ``output_format`` follow the same
+        semantics as :meth:`generate`.
 
         Raises :class:`ImageError`; codes -32311/-32312 indicate the
         provider does not support edit or masking.
@@ -254,6 +290,12 @@ class ImageClient:
             params["modelPreferences"] = model_preferences
         if metadata is not None:
             params["metadata"] = metadata
+        if quality is not None:
+            params["quality"] = quality
+        if resolution is not None:
+            params["resolution"] = resolution
+        if output_format is not None:
+            params["output_format"] = output_format
         return await self._call(METHOD_IMAGE_EDIT, params, timeout)
 
     # — internal —

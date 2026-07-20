@@ -35,6 +35,39 @@
             <option value="1536x1024">1536 × 1024 (landscape)</option>
           </select>
 
+          <label class="lbl" for="path">Call path</label>
+          <select id="path">
+            <option value="host">Host API — anna.image.* (direct)</option>
+            <option value="rpc">Reverse RPC — via image_poster executa</option>
+          </select>
+
+          <label class="lbl" for="model">Model <small>(optional hint)</small></label>
+          <select id="model">
+            <option value="">user preference (default)</option>
+            <option value="fal-ai/nano-banana-2">Nano Banana 2 (fal)</option>
+            <option value="openai/gpt-image-2">GPT Image 2 (fal)</option>
+            <option value="bytedance/seedream/v5/pro/text-to-image">Seedream 5.0 Pro (fal)</option>
+            <option value="doubao-seedream-5-0-260128">Doubao Seedream 5.0</option>
+            <option value="qwen-image-plus">Qwen Image Plus</option>
+          </select>
+
+          <label class="lbl" for="quality">Quality <small>(GPT-Image models)</small></label>
+          <select id="quality">
+            <option value="">model default</option>
+            <option value="low">low — cheapest</option>
+            <option value="medium">medium</option>
+            <option value="high">high — best, most expensive</option>
+          </select>
+
+          <label class="lbl" for="resolution">Resolution <small>(Nano-Banana models)</small></label>
+          <select id="resolution">
+            <option value="">auto (from size)</option>
+            <option value="0.5K">0.5K — 0.75× rate</option>
+            <option value="1K">1K — base rate</option>
+            <option value="2K">2K — 1.5× rate</option>
+            <option value="4K">4K — 2× rate</option>
+          </select>
+
           <button id="generate-btn" class="btn btn--primary" type="button">Generate</button>
           <button id="restyle-btn" class="btn" type="button" disabled>Restyle current</button>
           <button id="upload-btn" class="btn" type="button" disabled>Persist to host storage</button>
@@ -55,6 +88,7 @@
         <div class="history" id="history" aria-label="Recent generations"></div>
       </section>
     </main>
+    <script src="anna-tool-ids.js" defer></script>
     <script type="module" src="app.js"></script>
   </body>
 </html>

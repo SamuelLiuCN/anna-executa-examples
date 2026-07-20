@@ -92,6 +92,41 @@ function clearError() {
   errBox.textContent = "(none)";
 }
 
+// ──────────────────────────────────────────────────────────
+// Timing stats (耗时统计). performance.now() is monotonic — immune to wall
+// clock adjustments — which is the right base for elapsed measurements.
+// Latency-relevant numbers per surface:
+//   · one-shot: total round-trip (+ plugin-measured sampling time when the
+//     Executa path reports elapsed_ms, isolating transport overhead)
+//   · stream:   TTFT (time to first token — the UX-critical number for
+//     streaming), total, and decode rate (out-tokens / generation time)
+//   · agent run: first frame (queue + agent startup), first token, total
+
+const now = () => performance.now();
+
+function fmtMs(ms) {
+  if (ms == null || !Number.isFinite(ms)) return "—";
+  return ms >= 1000 ? `${(ms / 1000).toFixed(2)}s` : `${Math.round(ms)}ms`;
+}
+
+// Usage token count — tolerate both MCP (inputTokens/outputTokens) and
+// OpenAI-ish (prompt_tokens/completion_tokens) spellings across surfaces.
+function outTokens(usage) {
+  if (!usage) return undefined;
+  const n = usage.outputTokens ?? usage.completionTokens ?? usage.completion_tokens;
+  return Number.isFinite(Number(n)) && Number(n) > 0 ? Number(n) : undefined;
+}
+
+function renderStats(id, parts) {
+  const el = $(id);
+  if (el) el.textContent = parts.filter(Boolean).join("  ·  ");
+}
+
+function clearStats(id) {
+  const el = $(id);
+  if (el) el.textContent = "";
+}
+
 // Render the session lifecycle metadata (sliding idle deadline + absolute cap)
 // returned by create / refresh / list. Accepts a handle OR a plain info object.
 function renderLifecycle(info) {
@@ -282,15 +317,29 @@ async function runViaExecuta(prompt) {
 
 $("complete-btn").addEventListener("click", async () => {
   clearError();
+  clearStats("complete-stats");
   const mode = modeSel?.value || "direct";
   out.textContent = `(calling ${mode === "executa" ? "executa.complete" : "llm.complete"}…)`;
+  const t0 = now();
   try {
     const prompt = $("complete-input").value || "hi";
     const reply =
       mode === "executa" ? await runViaExecuta(prompt) : await runDirect(prompt);
+    const total = now() - t0;
     out.textContent = JSON.stringify(reply, null, 2);
+    const tok = outTokens(reply.usage);
+    renderStats("complete-stats", [
+      `⏱ total ${fmtMs(total)}`,
+      // Executa path: plugin-measured sampling/createMessage time — the
+      // difference vs total is the tools.invoke transport overhead.
+      reply.elapsed_ms != null && `sampling ${fmtMs(reply.elapsed_ms)}`,
+      tok && `${tok} out-tok`,
+      tok && `~${(tok / (total / 1000)).toFixed(1)} tok/s`,
+      reply.model && `model ${reply.model}`,
+    ]);
   } catch (err) {
     out.textContent = "(failed)";
+    renderStats("complete-stats", [`⏱ failed after ${fmtMs(now() - t0)}`]);
     showError(mode === "executa" ? "tools.invoke" : "llm.complete", err);
   }
 });
@@ -303,7 +352,13 @@ const streamOut = $("stream-out");
 
 $("stream-btn").addEventListener("click", async () => {
   clearError();
+  clearStats("stream-stats");
   streamOut.textContent = "(streaming llm.stream…)\n";
+  const t0 = now();
+  let ttft = null; // time to first token — THE latency number for streaming
+  let tokenFrames = 0;
+  let usage = null;
+  let model = null;
   try {
     const anna = await annaReady;
     const p = readCompletionParams();
@@ -322,9 +377,13 @@ $("stream-btn").addEventListener("click", async () => {
     const stream = anna.llm.stream(req);
     for await (const frame of stream) {
       if (frame.event === "model_token" && frame.text) {
+        if (ttft == null) ttft = now() - t0;
+        tokenFrames += 1;
         text += frame.text;
         streamOut.textContent = text;
       } else if (frame.event === "complete") {
+        usage = frame.usage || null;
+        model = frame.model || null;
         streamOut.textContent =
           text + "\n\n" + JSON.stringify(frame, null, 2);
       } else if (frame.event === "error") {
@@ -332,8 +391,21 @@ $("stream-btn").addEventListener("click", async () => {
       }
     }
     streamOut.textContent += "\n(done)";
+    const total = now() - t0;
+    // Decode rate over the GENERATION window (first token → done), not the
+    // whole round-trip — otherwise queue/prefill time deflates the number.
+    const genMs = ttft != null ? total - ttft : total;
+    const tok = outTokens(usage) ?? (tokenFrames || undefined);
+    renderStats("stream-stats", [
+      `⏱ total ${fmtMs(total)}`,
+      ttft != null && `first token ${fmtMs(ttft)}`,
+      tok && genMs > 0 && `~${(tok / (genMs / 1000)).toFixed(1)} tok/s`,
+      tok && `${tok} out-tok`,
+      model && `model ${model}`,
+    ]);
   } catch (err) {
     streamOut.textContent += "\n(failed)";
+    renderStats("stream-stats", [`⏱ failed after ${fmtMs(now() - t0)}`]);
     showError("llm.stream", err);
   }
 });
@@ -348,21 +420,37 @@ const chainOut = $("chain-out");
 
 $("chain-btn").addEventListener("click", async () => {
   clearError();
+  clearStats("chain-stats");
   const anna = await annaReady;
   const steps = Math.max(1, Number($("chain-steps").value) || 3);
   const delay_s = Math.max(0, Number($("chain-delay").value) || 0);
   const max_tokens = Math.max(1, Number($("chain-maxtokens").value) || 128);
   const prompt = $("chain-input").value || "hi";
   chainOut.textContent = `(running sample_chain: ${steps} step(s)…)`;
+  const t0 = now();
   try {
     const reply = await anna.tools.invoke({
       tool_id: EXECUTA_TOOL_ID,
       method: "sample_chain",
       args: { prompt, steps, delay_s, max_tokens },
     });
+    const total = now() - t0;
     chainOut.textContent = JSON.stringify(reply, null, 2);
+    // Per-step sampling times come from the plugin; their sum is pure LLM
+    // time (the plugin total also counts the artificial inter-step delays).
+    const stepMs = (reply.steps || [])
+      .map((s) => s.elapsed_ms)
+      .filter((v) => v != null);
+    renderStats("chain-stats", [
+      `⏱ total ${fmtMs(total)}`,
+      reply.elapsed_ms != null && `plugin ${fmtMs(reply.elapsed_ms)}`,
+      stepMs.length &&
+        `steps [${stepMs.map((v) => fmtMs(v)).join(", ")}]`,
+      outTokens(reply.totalUsage) && `${outTokens(reply.totalUsage)} out-tok`,
+    ]);
   } catch (err) {
     chainOut.textContent = "(failed)";
+    renderStats("chain-stats", [`⏱ failed after ${fmtMs(now() - t0)}`]);
     showError("tools.invoke(sample_chain)", err);
   }
 });
@@ -492,24 +580,59 @@ $("session-create-btn").addEventListener("click", async () => {
   }
 });
 
+// Per-run MCP modelPreferences for agent.session.run — built from the
+// section-2 inputs. Applied to ONE run only (sessions never pin a model);
+// soft preference with the same host-side resolution as llm.complete /
+// sampling (hints substring match → saved model → default; never fails).
+function readRunModelPreferences() {
+  const num = (id) => {
+    const raw = ($(id)?.value || "").trim();
+    if (raw === "") return undefined;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : undefined;
+  };
+  const hint = ($("run-hint")?.value || "").trim();
+  const mp = {};
+  if (hint) mp.hints = [{ name: hint }];
+  const cost = num("run-cost");
+  const speed = num("run-speed");
+  const intel = num("run-intel");
+  if (cost !== undefined) mp.costPriority = cost;
+  if (speed !== undefined) mp.speedPriority = speed;
+  if (intel !== undefined) mp.intelligencePriority = intel;
+  return Object.keys(mp).length ? mp : undefined;
+}
+
 $("run-btn").addEventListener("click", async () => {
   clearError();
+  clearStats("run-stats");
   const uuid = currentUuid();
   if (!uuid) return;
   const content = $("run-input").value || "hello";
+  const modelPreferences = readRunModelPreferences();
   runOut.textContent = "(streaming…)\n";
+  const t0 = now();
+  let firstFrame = null; // queue + agent startup latency
+  let ttft = null;       // first visible token
+  let tokenFrames = 0;
   try {
     if (transport() === "host") {
       // attach() (or the fresh create handle) gives a streaming .run() for
       // ANY existing uuid — e.g. one picked from a list() result after reload.
       const handle = await hostHandle();
-      const stream = handle.run({ content });
+      const stream = handle.run({
+        content,
+        ...(modelPreferences ? { modelPreferences } : {}),
+      });
       for await (const frame of stream) {
+        if (firstFrame == null) firstFrame = now() - t0;
         if (frame.run_id) sess.runId = frame.run_id;
         if (frame.event === "run_meta") {
           // Authoritative tool surface for THIS run (and zero-tools warning).
           handleRunMeta(frame);
         } else if (frame.event === "token" && frame.text) {
+          if (ttft == null) ttft = now() - t0;
+          tokenFrames += 1;
           runOut.textContent += frame.text;
         } else {
           runOut.textContent += `\n[${frame.event}] ${JSON.stringify(frame)}\n`;
@@ -518,11 +641,30 @@ $("run-btn").addEventListener("click", async () => {
       // The stream carries the host-assigned run_id (used by cancel).
       if (stream.runId) sess.runId = stream.runId;
       runOut.textContent += "\n(done)";
+      const total = now() - t0;
+      const genMs = ttft != null ? total - ttft : total;
+      renderStats("run-stats", [
+        `⏱ total ${fmtMs(total)}`,
+        firstFrame != null && `first frame ${fmtMs(firstFrame)}`,
+        ttft != null && `first token ${fmtMs(ttft)}`,
+        tokenFrames && genMs > 0 &&
+          `~${(tokenFrames / (genMs / 1000)).toFixed(1)} tok-frames/s`,
+        modelPreferences && `prefs ${JSON.stringify(modelPreferences)}`,
+      ]);
     } else {
-      const r = await executaSession("run", {
-        app_session_uuid: uuid,
-        prompt: content,
-      });
+      const args = { app_session_uuid: uuid, prompt: content };
+      // Flat args — the plugin's agent_session tool re-assembles them into
+      // MCP modelPreferences and forwards over agent/session.run.
+      if (modelPreferences?.hints?.[0]?.name)
+        args.model_hint = modelPreferences.hints[0].name;
+      if (modelPreferences?.costPriority !== undefined)
+        args.cost_priority = modelPreferences.costPriority;
+      if (modelPreferences?.speedPriority !== undefined)
+        args.speed_priority = modelPreferences.speedPriority;
+      if (modelPreferences?.intelligencePriority !== undefined)
+        args.intelligence_priority = modelPreferences.intelligencePriority;
+      const r = await executaSession("run", args);
+      const total = now() - t0;
       runOut.textContent = (r.text || JSON.stringify(r, null, 2)) + "\n";
       // The reverse-RPC run is buffered — the run_meta frame (tool surface +
       // NO_TOOLS_AVAILABLE warning) is in the returned frames array.
@@ -530,8 +672,17 @@ $("run-btn").addEventListener("click", async () => {
         if (frame.run_id) sess.runId = frame.run_id;
         if (frame.event === "run_meta") handleRunMeta(frame);
       }
+      renderStats("run-stats", [
+        `⏱ total ${fmtMs(total)}`,
+        // Buffered transport: no TTFT — the plugin reports its own wall time
+        // for the whole reverse-RPC run; the difference is invoke overhead.
+        r.elapsed_ms != null && `plugin ${fmtMs(r.elapsed_ms)}`,
+        (r.frames || []).length && `${r.frames.length} frames`,
+        modelPreferences && `prefs ${JSON.stringify(modelPreferences)}`,
+      ]);
     }
   } catch (err) {
+    renderStats("run-stats", [`⏱ failed after ${fmtMs(now() - t0)}`]);
     showError("agent.session.run", err);
   }
 });

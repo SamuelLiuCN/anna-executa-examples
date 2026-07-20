@@ -7,7 +7,7 @@
   "required_executas": [
     {
       "tool_id": "bundled:llm-via-executa",
-      "min_version": "0.1.0",
+      "min_version": "0.2.0",
       "version": "latest"
     }
   ],

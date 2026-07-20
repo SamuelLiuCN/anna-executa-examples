@@ -65,22 +65,39 @@ func (e *ImageError) Error() string {
 }
 
 // GenerateRequest mirrors `image/generate` params.
+//
+// Quality / Resolution / OutputFormat / EnableWebSearch / ThinkingLevel are
+// advanced provider options (host validates; unsupported models ignore
+// them): Quality = low|medium|high (GPT-Image family, affects cost);
+// Resolution = 0.5K|1K|2K|4K (Nano-Banana family, 0.75x/1x/1.5x/2x rate);
+// EnableWebSearch / ThinkingLevel(high) add a small surcharge on
+// Nano Banana 2.
 type GenerateRequest struct {
 	Prompt             string         `json:"prompt"`
 	N                  int            `json:"n"`
 	Size               string         `json:"size,omitempty"`
 	ReferenceImageURLs []string       `json:"reference_image_urls,omitempty"`
+	Quality            string         `json:"quality,omitempty"`
+	Resolution         string         `json:"resolution,omitempty"`
+	OutputFormat       string         `json:"output_format,omitempty"`
+	EnableWebSearch    bool           `json:"enable_web_search,omitempty"`
+	ThinkingLevel      string         `json:"thinking_level,omitempty"`
 	ModelPreferences   map[string]any `json:"modelPreferences,omitempty"`
 	Metadata           map[string]any `json:"metadata,omitempty"`
 }
 
-// EditRequest mirrors `image/edit` params.
+// EditRequest mirrors `image/edit` params. MaskURL requires a
+// mask-capable model (e.g. GPT Image 2) — otherwise the host rejects
+// with -32312.
 type EditRequest struct {
 	ImageURL         string         `json:"image_url"`
 	Prompt           string         `json:"prompt"`
 	MaskURL          string         `json:"mask_url,omitempty"`
 	N                int            `json:"n"`
 	Size             string         `json:"size,omitempty"`
+	Quality          string         `json:"quality,omitempty"`
+	Resolution       string         `json:"resolution,omitempty"`
+	OutputFormat     string         `json:"output_format,omitempty"`
 	ModelPreferences map[string]any `json:"modelPreferences,omitempty"`
 	Metadata         map[string]any `json:"metadata,omitempty"`
 }

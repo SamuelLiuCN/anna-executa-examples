@@ -58,6 +58,16 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 }
 .out.warn[hidden] { display: none; }
 
+/* ⏱ timing stats line under each output — populated by app.js */
+.stats {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  color: #4682b4;
+  margin: 0.15rem 0 0.4rem;
+  min-height: 1em;
+  word-break: break-all;
+}
+
 .mode-row {
   display: flex;
   align-items: center;

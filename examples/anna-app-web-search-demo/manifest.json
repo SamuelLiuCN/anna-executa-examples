@@ -1,0 +1,51 @@
+{
+  "schema": 2,
+  "permissions": [
+    "tools.invoke"
+  ],
+  "required_executas": [
+    {
+      "tool_id": "bundled:web-search-via-executa",
+      "min_version": "0.1.0",
+      "version": "latest"
+    }
+  ],
+  "optional_executas": [],
+  "system_prompt_addendum": "The user has the Web Search Demo app open. It demonstrates the host-managed web capability over BOTH channels: the iframe HOST API (anna.web.search / anna.web.fetch / anna.web.image_search / anna.web.image_fetch — direct postMessage RPC, no executa involved) and the Reverse RPC twin (the bundled web-search-via-executa Executa issuing web/search + web/fetch + web/image_search from a stdio plugin). Provider keys, SSRF guarding, quota and billing all stay host-side; results are provider-agnostic and both channels share the same wire contract, pricing and web_grant. Phase 2 adds image search (safe-search force-enabled) and image download to APS file storage (artifact reference only — path + short-lived get_url, never bytes).",
+  "tags": ["demo", "web", "search", "fetch", "image-search", "executa"],
+  "ui": {
+    "bundle": {
+      "format": "static-spa",
+      "entry": "index.html",
+      "external_origins": []
+    },
+    "views": [
+      {
+        "name": "main",
+        "title": "Web Search Demo",
+        "default": true,
+        "entry": "index.html",
+        "min_size": { "w": 480, "h": 600 },
+        "default_size": { "w": 680, "h": 820 },
+        "resizable": true,
+        "movable": true,
+        "single_instance": true
+      }
+    ],
+    "host_api": {
+      "web": ["search", "fetch", "image_search", "image_fetch"],
+      "tools": ["required:bundled:web-search-via-executa"],
+      "window": ["set_title"]
+    },
+    "csp_overrides": {
+      "script-src": ["'self'"],
+      "connect-src": ["'self'", "https:"],
+      "img-src": ["'self'", "https:", "data:"]
+    },
+    "state_merge": "last_writer_wins"
+  },
+  "dev": {
+    "fixtures": ["fixtures/*.jsonl"],
+    "user_id": 1
+  }
+}
