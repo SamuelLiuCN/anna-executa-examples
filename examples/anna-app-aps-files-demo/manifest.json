@@ -4,6 +4,8 @@
     "chat.write_message",
     "tools.invoke"
   ],
+  "_comment_host_capabilities": "aps.scope.user.read lets the app-side files.* (here: files.download with scope:'user') READ the user-scope objects the bundled Executa wrote. APS rows are always filtered by user_id — this never exposes another user's data. Without it, non-default scopes are refused with permission_denied.",
+  "host_capabilities": ["aps.scope.user.read"],
   "required_executas": [
     {
       "tool_id": "bundled:files-via-executa",
@@ -12,7 +14,7 @@
     }
   ],
   "optional_executas": [],
-  "system_prompt_addendum": "The user has the APS Files Demo app open. It saves text notes to Anna object storage by invoking the bundled files-via-executa Executa (save_note / get_link / list_notes). The app itself has no upload grant — all object storage goes through the Executa's aps.files capability.",
+  "system_prompt_addendum": "The user has the APS Files Demo app open. It saves text notes to Anna object storage by invoking the bundled files-via-executa Executa (save_note / get_link / list_notes). Both modes also demonstrate anna.files.download — the host-mediated browser save where the presigned URL never enters the app iframe (tool mode reads the Executa's scope=user notes via the aps.scope.user.read capability). The app itself has no upload grant — all object storage goes through the Executa's aps.files capability.",
   "tags": ["demo", "storage", "files", "aps", "executa"],
   "ui": {
     "bundle": {
@@ -35,7 +37,7 @@
     ],
     "host_api": {
       "tools": ["required:bundled:files-via-executa"],
-      "files": ["upload_init", "upload_finalize", "download_url", "list", "delete"],
+      "files": ["upload_init", "upload_finalize", "download_url", "download", "list", "delete"],
       "chat": ["write_message"],
       "window": ["set_title"]
     },

@@ -630,10 +630,12 @@ $("run-btn").addEventListener("click", async () => {
         if (frame.event === "run_meta") {
           // Authoritative tool surface for THIS run (and zero-tools warning).
           handleRunMeta(frame);
-        } else if (frame.event === "token" && frame.text) {
+        } else if (frame.event === "sse" && frame.choices?.[0]?.delta?.content) {
+          // Token frames are OpenAI-style chunks tagged event:"sse";
+          // streamed text lives at choices[0].delta.content.
           if (ttft == null) ttft = now() - t0;
           tokenFrames += 1;
-          runOut.textContent += frame.text;
+          runOut.textContent += frame.choices[0].delta.content;
         } else {
           runOut.textContent += `\n[${frame.event}] ${JSON.stringify(frame)}\n`;
         }

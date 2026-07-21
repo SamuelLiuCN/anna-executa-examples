@@ -681,7 +681,10 @@ async def _agent_session(
             model_preferences=model_preferences,
         ):
             frames.append(frame)
-            if frame.get("event") == "token" and frame.get("text"):
+            # Matrix host normalizes nexus's OpenAI-style chunks into
+            # {"event": "delta", "text": ...} for the executa path (plus a
+            # synthesized terminal {"event": "final", "text": <full text>}).
+            if frame.get("event") == "delta" and frame.get("text"):
                 text_chunks.append(frame["text"])
         return {
             "op": op,
