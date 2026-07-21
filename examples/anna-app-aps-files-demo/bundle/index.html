@@ -26,8 +26,9 @@
           <code>anna.files.*</code> directly with its own
           <code>ui.host_api.files</code> grant: <code>upload_init</code> &rarr;
           browser <code>PUT</code> to a presigned R2 URL &rarr;
-          <code>upload_finalize</code>. Writes to <code>scope=app</code> (the
-          app's own object space).
+          <code>upload_finalize</code>, plus the host-mediated
+          <code>files.download</code> browser save. Writes to
+          <code>scope=app</code> (the app's own object space).
         </li>
       </ul>
       <div class="row mode-toggle" role="radiogroup" aria-label="Access mode">
@@ -62,10 +63,23 @@
     </section>
 
     <section>
-      <h2>2. Get a download link</h2>
-      <p class="muted">Mints a short-lived presigned URL for the path above.</p>
+      <h2>2. Get a link / download</h2>
+      <p class="muted">
+        <strong>Get link</strong> mints a short-lived presigned URL for the path
+        above. <strong>Download</strong> calls <code>anna.files.download</code>
+        &mdash; the <em>host-mediated</em> save: the host presigns with
+        <code>Content-Disposition: attachment</code>, triggers the browser save
+        dialog from the <em>top-level page</em>, and strips the URL before this
+        iframe sees the result. The bearer URL never enters app DOM. In
+        <strong>Tool invoke</strong> mode the note was written by the Executa
+        into <code>scope=user</code>, so the app passes
+        <code>scope: "user"</code> &mdash; gated by the manifest capability
+        <code>aps.scope.user.read</code>. In <strong>HOST API</strong> mode it
+        reads the app's own <code>scope=app</code> object.
+      </p>
       <div class="row">
         <button id="link-btn">Get link</button>
+        <button id="dl-btn">Download</button>
         <button id="list-btn">List notes</button>
       </div>
       <pre id="link-out" class="out">(no link yet)</pre>

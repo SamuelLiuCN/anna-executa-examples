@@ -22,8 +22,12 @@ HOST API (scope=app):
 - **HOST API mode**: the UI calls `anna.files.upload_init` →
   browser-side `PUT` → `anna.files.upload_finalize`,
   `anna.files.download_url`, `anna.files.list` directly, using the app's
-  own `ui.host_api.files` grant. Objects land in the app's own space
-  (**`scope: "app"`**, host-forced).
+  own `ui.host_api.files` grant — plus **`anna.files.download`**, the
+  host-mediated browser save (host ≥ 1.1.0-beta.97 / dispatcher ≥
+  0.17.0): the host presigns with a forced
+  `Content-Disposition: attachment`, opens the save dialog from the
+  top-level page, and strips the URL before the iframe sees the result.
+  Objects land in the app's own space (**`scope: "app"`**, host-forced).
 
 Because the two modes write to different scopes (`user` vs `app`), notes
 saved in one mode are **not** visible from the other — that is faithful
@@ -52,13 +56,14 @@ grants `ui.host_api.files` in addition to the executa-tools grant:
 
 ```json
 "permissions": ["chat.write_message", "tools.invoke"],
+"host_capabilities": ["aps.scope.user.read"],
 "required_executas": [
   { "tool_id": "bundled:files-via-executa", "min_version": "0.1.0", "version": "latest" }
 ],
 "ui": {
   "host_api": {
     "tools":  ["required:bundled:files-via-executa"],
-    "files":  ["upload_init", "upload_finalize", "download_url", "list", "delete"],
+    "files":  ["upload_init", "upload_finalize", "download_url", "download", "list", "delete"],
     "chat":   ["write_message"],
     "window": ["set_title"]
   }
@@ -67,7 +72,13 @@ grants `ui.host_api.files` in addition to the executa-tools grant:
 
 > A real app that only needs the recommended pattern should drop the
 > `files` line entirely and keep `tools` only — the `files` grant exists
-> here purely to demonstrate the HOST API alternative.
+> here purely to demonstrate the HOST API alternative. Exception: keep
+> `files: ["download"]` + `host_capabilities: ["aps.scope.user.read"]`
+> if you want the host-mediated browser save for Executa-generated
+> (`scope=user`) artifacts — `files.download` is an app-iframe surface
+> (the browser save dialog must be triggered by the host page), so it
+> cannot be delegated to the Executa. `aps.scope.user.read` only ever
+> exposes the current user's own rows (APS filters by `user_id`).
 
 The bundled Executa declares `host_capabilities: ["aps.files"]` in its
 `MANIFEST`. Without it the host refuses the `files/*` reverse-RPC with
@@ -112,6 +123,17 @@ The harness opens the bundle in a Chromium iframe:
    Files**. The active path uploads the bytes and reports size + ETag.
 3. Click **Get link** for a short-lived presigned `download_url`, or
    **List notes** to enumerate objects under the path's top-level prefix.
+4. Click **Download** to trigger the host-mediated browser save
+   (`anna.files.download`) — the save dialog is opened by the harness
+   dashboard (top-level page), and the result shown in the iframe
+   deliberately contains **no URL**. This answers “the Executa generated
+   a file — how does the app download it?”: in **Tool invoke** mode the
+   note lives in `scope=user` (written by the Executa), so the app calls
+   `anna.files.download({ path, scope: "user" })`, gated by the manifest
+   `host_capabilities: ["aps.scope.user.read"]`; in **HOST API** mode it
+   reads the app's own `scope=app` object with no extra capability.
+   Requires `@anna-ai/cli` ≥ 0.1.39 (harness) or Anna host ≥
+   1.1.0-beta.97 (production).
 
 > **HOST API uploads `PUT` straight from the browser** to the
 > host-issued presigned R2 URL, so the R2 bucket needs CORS allowing the

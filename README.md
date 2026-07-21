@@ -40,6 +40,8 @@ anna-executa-examples/
 │                                        #     focus-session-{python,node,go}; pick one via
 │                                        #     `executa.json` or `--executa` CLI flag.
 │   └── anna-app-visual-brand/           # ⭐ Anna App — host LLM image generate/edit + APS persistence
+│   └── anna-app-session-demo/           # ⭐ Anna App — agent.session workspace best practices
+│                                        #     (fixed-client affinity, absolute paths, nonce-verified writes)
 ├── sdk/                                 # Reference SDKs used by the sampling examples
 │   ├── python/                          # executa_sdk
 │   ├── nodejs/                          # @anna/executa-sdk

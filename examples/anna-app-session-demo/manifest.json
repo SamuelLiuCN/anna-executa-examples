@@ -1,0 +1,43 @@
+{
+  "schema": 2,
+  "permissions": [],
+  "required_executas": [],
+  "optional_executas": [],
+  "system_prompt_addendum": "The user has the Agent Session Demo app open. It demonstrates agent.session workspace best practices: pinning a session to one filesystem client (submode=fixed), discovering the workspace root and then using absolute paths only, verifying file writes with a nonce read-back, and reporting structured filesystem errors (PATH_OUTSIDE_SANDBOX / NOT_FOUND) verbatim instead of falling back to similar paths. You do not need to summon any windows.",
+  "tags": ["demo", "agent", "session", "filesystem", "workspace", "best-practices"],
+  "ui": {
+    "bundle": {
+      "format": "static-spa",
+      "entry": "index.html",
+      "external_origins": []
+    },
+    "views": [
+      {
+        "name": "main",
+        "title": "Agent Session Demo",
+        "default": true,
+        "entry": "index.html",
+        "min_size": { "w": 460, "h": 620 },
+        "default_size": { "w": 620, "h": 820 },
+        "resizable": true,
+        "movable": true,
+        "single_instance": true
+      }
+    ],
+    "host_api": {
+      "window": ["set_title"],
+      "agent": {
+        "session": { "auto": true, "fixed": {} },
+        "tools": []
+      }
+    },
+    "csp_overrides": {
+      "script-src": ["'self'"]
+    },
+    "state_merge": "last_writer_wins"
+  },
+  "dev": {
+    "fixtures": ["fixtures/*.jsonl"],
+    "user_id": 1
+  }
+}

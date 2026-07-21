@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Agent Session Demo</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>anna-app Agent Session Demo</h1>
+      <p class="muted">
+        Best practices for driving <code>anna.agent.session</code> when the
+        agent must <strong>read and write workspace files reliably</strong>:
+        pin the session to one filesystem client
+        (<code>submode: "fixed"</code>), discover the workspace root and use
+        <strong>absolute paths only</strong>, verify writes with a
+        <strong>nonce read-back</strong> instead of trusting completion
+        claims, and treat structured filesystem errors
+        (<code>PATH_OUTSIDE_SANDBOX</code> / <code>NOT_FOUND</code>) as a
+        stop signal — never a cue to fall back to a similar path.
+      </p>
+    </header>
+
+    <section>
+      <h2>1. Session setup</h2>
+      <div class="mode-row">
+        <label for="submode-sel">Submode:</label>
+        <select id="submode-sel">
+          <option value="auto" selected>auto — host picks the agent (default / cloud resolution)</option>
+          <option value="fixed">fixed — pin to one client_id (workspace affinity)</option>
+        </select>
+      </div>
+      <p class="muted mode-hint" id="submode-hint"></p>
+      <div class="mode-row" id="fixed-client-row" hidden>
+        <label for="fixed-client-input">fixed_client_id:</label>
+        <input
+          id="fixed-client-input"
+          type="text"
+          class="text-input"
+          placeholder="client id of the agent whose workspace you want to pin"
+          autocomplete="off"
+          spellcheck="false"
+        />
+      </div>
+
+      <label for="session-system-prompt">Session system prompt (path discipline, applied to every run):</label>
+      <textarea id="session-system-prompt" rows="7"></textarea>
+
+      <div class="btn-row">
+        <button id="create-btn">create</button>
+        <input
+          id="session-uuid-input"
+          type="text"
+          class="uuid-input"
+          placeholder="app_session_uuid — create, type, or pick from list()"
+          autocomplete="off"
+          spellcheck="false"
+        />
+      </div>
+      <div class="btn-row">
+        <button id="refresh-btn" disabled>refresh</button>
+        <button id="delete-btn" disabled>delete</button>
+        <button id="list-btn">list</button>
+        <button id="history-btn" disabled>history</button>
+      </div>
+      <p class="muted" id="session-status">no session</p>
+      <p class="muted lifecycle" id="session-lifecycle">lifecycle: (none)</p>
+      <p class="muted lifecycle" id="session-tools">tools: (unknown — create a session to find out)</p>
+      <div id="tools-warning" class="out warn" hidden></div>
+      <div id="session-list" class="session-list"></div>
+      <pre id="setup-out" class="out">(no output yet)</pre>
+    </section>
+
+    <section>
+      <h2>2. Workspace walkthrough</h2>
+      <p class="muted">
+        Three guided runs against the session above. Each step's prompt is
+        printed before the streamed reply so you can see exactly what
+        instruction pattern is being demonstrated.
+      </p>
+
+      <h3>Step 1 — Discover the workspace root</h3>
+      <p class="muted">
+        Never assume the root (<code>~</code> expands differently on cloud vs
+        local agents). Ask the agent to report the <strong>canonical absolute
+        root</strong> its filesystem tools actually operate on; all later
+        instructions embed absolute paths under it.
+      </p>
+      <div class="btn-row">
+        <button id="discover-btn" disabled>run discover</button>
+        <span class="muted" id="root-status">workspace root: (unknown)</span>
+      </div>
+      <pre id="discover-out" class="out">(no output yet)</pre>
+
+      <h3>Step 2 — Write, then VERIFY with a nonce read-back</h3>
+      <p class="muted">
+        A "task completed" claim is not proof the file changed (forum
+        <code>/t/174</code>, <code>/t/86</code>). Write a nonce to an absolute
+        path, then read it back in an <em>independent</em> run and compare
+        content in app code.
+      </p>
+      <div class="mode-row">
+        <label for="nonce-input">Nonce:</label>
+        <input
+          id="nonce-input"
+          type="text"
+          class="text-input"
+          value="demo-nonce-0001"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <button id="nonce-random-btn" class="inline-btn">randomize</button>
+      </div>
+      <div class="btn-row">
+        <button id="write-btn" disabled>run write</button>
+        <button id="verify-btn" disabled>run verify (read-back)</button>
+      </div>
+      <p class="muted lifecycle" id="write-target">target: (discover the root first)</p>
+      <div id="verify-verdict" class="out warn" hidden></div>
+      <pre id="write-out" class="out">(no output yet)</pre>
+
+      <h3>Step 3 — Out-of-root probe (structured error, no fallback)</h3>
+      <p class="muted">
+        Ask the agent to read an absolute path that cannot exist in the
+        workspace. Correct behaviour: report the tool's structured error
+        verbatim (<code>error_code</code> + <code>sandbox_root</code> when
+        sandboxed) and <strong>stop</strong> — not silently trim the path,
+        guess another root, or "helpfully" open a similarly named directory.
+      </p>
+      <div class="btn-row">
+        <button id="probe-btn" disabled>run probe</button>
+      </div>
+      <pre id="probe-out" class="out">(no output yet)</pre>
+    </section>
+
+    <section>
+      <h2>3. Freeform run</h2>
+      <textarea id="run-input" rows="2">List the files at your workspace root. Reply with their canonical absolute paths.</textarea>
+      <div class="btn-row">
+        <button id="run-btn" disabled>run (streamed)</button>
+        <button id="cancel-btn" disabled>cancel</button>
+      </div>
+      <pre id="run-out" class="out">(no output yet)</pre>
+    </section>
+
+    <section>
+      <h2>Errors</h2>
+      <pre id="errors" class="out err">(none)</pre>
+    </section>
+
+    <!-- app.js is a native ES module that imports the runtime SDK directly.
+         No inline script — the bundle CSP is `script-src 'self' <sdk-origin>`,
+         which blocks inline scripts but allows this external module and its
+         static import from the SDK origin. -->
+    <script src="app.js" type="module"></script>
+  </body>
+</html>

@@ -99,6 +99,24 @@ const toolMode = {
     rawBox.textContent = JSON.stringify(reply, null, 2);
     return unwrap(reply).items || [];
   },
+  async download(path) {
+    // "Executa generated a file — how does the app download it?" — the
+    // canonical answer. Tool-invoke notes live in scope=user (written under
+    // the Executa's own storage_token). The app reaches them with the
+    // CROSS-SCOPE form of the host-mediated download: `scope: "user"`.
+    // Gating is two-layer: `ui.host_api.files: ["download"]` (dispatcher
+    // ACL) + `host_capabilities: ["aps.scope.user.read"]` (scope gate —
+    // download is a read, so .read suffices). APS rows are always filtered
+    // by user_id, so this only ever reads the CURRENT user's own space.
+    const anna = await annaReady;
+    const res = await anna.files.download({
+      path,
+      scope: "user",
+      filename: path.split("/").pop() || "note.txt",
+    });
+    rawBox.textContent = JSON.stringify(res, null, 2);
+    return res; // { ok, filename, expires_at, etag, size_bytes, content_type }
+  },
 };
 
 // ---- HOST API mode (anna.files.* directly, app's own grant) ----------------
@@ -154,6 +172,21 @@ const hostMode = {
     rawBox.textContent = JSON.stringify(res, null, 2);
     return res.items || [];
   },
+  async download(path) {
+    const anna = await annaReady;
+    // Host-mediated save (dispatcher ≥ 0.17.0, forum #175): the host presigns
+    // with a forced `Content-Disposition: attachment`, clicks a top-level
+    // anchor in the HOST page (a sandboxed iframe can't reliably save files),
+    // and strips `get_url` before this result arrives — note the response has
+    // `ok: true` + metadata but NO URL. `filename` is optional and defaults
+    // to the last path segment.
+    const res = await anna.files.download({
+      path,
+      filename: path.split("/").pop() || "note.txt",
+    });
+    rawBox.textContent = JSON.stringify(res, null, 2);
+    return res; // { ok, filename, expires_at, etag, size_bytes, content_type }
+  },
 };
 
 function activeImpl() {
@@ -206,6 +239,29 @@ $("link-btn").addEventListener("click", async () => {
     showStatus(`get_link · ${modeLabel()}`, err, true);
   } finally {
     $("link-btn").disabled = false;
+  }
+});
+
+$("dl-btn").addEventListener("click", async () => {
+  const path = $("note-path").value.trim() || "notes/hello.txt";
+  $("dl-btn").disabled = true;
+  showStatus(`download · ${modeLabel()}`, "requesting host-mediated save…", false);
+  try {
+    const res = await activeImpl().download(path);
+    // The browser save dialog was opened by the HOST page — the result that
+    // reaches this iframe deliberately contains no URL.
+    $("link-out").textContent =
+      `download triggered by host ✓\n`
+      + `filename:     ${res.filename ?? "—"}\n`
+      + `size_bytes:   ${res.size_bytes ?? "—"}\n`
+      + `content_type: ${res.content_type ?? "—"}\n`
+      + `get_url:      (stripped by host — never enters the iframe)`;
+    showStatus(`download · ${modeLabel()}`, "browser save triggered ✓", false);
+  } catch (err) {
+    $("link-out").textContent = "(failed)";
+    showStatus(`download · ${modeLabel()}`, err, true);
+  } finally {
+    $("dl-btn").disabled = false;
   }
 });
 
