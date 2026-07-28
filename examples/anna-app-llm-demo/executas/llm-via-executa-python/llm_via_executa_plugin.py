@@ -62,7 +62,7 @@ from executa_sdk import (  # noqa: E402
 
 MANIFEST = {
     "display_name": "LLM via Executa",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "description": (
         "Performs an LLM completion on behalf of the calling app by "
         "asking the host to sample (sampling/createMessage)."
@@ -250,12 +250,19 @@ MANIFEST = {
         },
         {
             "name": "agent_session",
+            # Buffered reverse-RPC runs block this invoke for the WHOLE agent
+            # loop — the matrix host honors this per-tool deadline when the
+            # caller does not negotiate one (default would be 60s, which a
+            # single tool-using / image turn can exceed).
+            "timeout": 180,
             "description": (
                 "Drive an Anna App Session over the Reverse RPC path: the "
                 "plugin issues agent/session.* reverse-RPCs to the host. "
                 "The 'op' argument selects the operation "
                 "(create|run|cancel|history|delete|list). op=run accepts "
-                "per-run MCP modelPreferences (model_hint + priorities). "
+                "per-run MCP modelPreferences (model_hint + priorities) and "
+                "native image attachments (the session's vision model sees "
+                "the images directly \u2014 no analyze_image round-trip). "
                 "This mirrors the iframe HOST API anna.agent.session.* "
                 "surface so the demo can compare both transports."
             ),
@@ -290,6 +297,37 @@ MANIFEST = {
                     "description": "User turn content for op=run.",
                     "required": False,
                     "default": "",
+                },
+                {
+                    "name": "attachments",
+                    "type": "array",
+                    "items_type": "object",
+                    "description": (
+                        "Native image attachments for op=run (forum #171): "
+                        "[{type: 'image/png', url: 'https://\u2026'} | "
+                        "{type: 'image/jpeg', data: '<base64 or data: URI>', "
+                        "filename?}]. Max 6 images, image/* only; url must "
+                        "be public HTTPS. The session's model must be "
+                        "vision-capable or the run fails with "
+                        "APP_MODEL_NOT_VISION_CAPABLE \u2014 pair with "
+                        "model_hint to pick a vision model."
+                    ),
+                    "required": False,
+                    "default": None,
+                },
+                {
+                    "name": "allowed_tools",
+                    "type": "array",
+                    "items_type": "string",
+                    "description": (
+                        "Per-run tool subset for op=run \u2014 narrows this "
+                        "run's tool surface (and thus the prompt) to the "
+                        "listed session-granted tools. Sandbox sessions "
+                        "only; inherit-host-tools sessions keep the full "
+                        "host kit regardless."
+                    ),
+                    "required": False,
+                    "default": None,
                 },
                 {
                     "name": "submode",
@@ -592,6 +630,8 @@ async def _agent_session(
     *,
     app_session_uuid: str = "",
     prompt: str = "",
+    attachments: list | None = None,
+    allowed_tools: list | None = None,
     submode: str = "auto",
     system_prompt: str = "",
     run_id: str = "",
@@ -677,6 +717,8 @@ async def _agent_session(
         t0 = time.perf_counter()
         async for frame in handle.run(
             prompt or "hello",
+            attachments=attachments or None,
+            allowed_tools=allowed_tools or None,
             recursion_limit=8,
             model_preferences=model_preferences,
         ):
@@ -692,6 +734,7 @@ async def _agent_session(
             "text": "".join(text_chunks),
             "frames": frames,
             "modelPreferences": model_preferences,
+            "attachment_count": len(attachments or []),
             # Buffered transport: one number is all we can measure — the
             # whole run (queue + agent loop + streaming) as seen from the
             # plugin.

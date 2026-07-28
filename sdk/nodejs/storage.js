@@ -38,6 +38,8 @@
 
 const crypto = require("node:crypto");
 
+const { attachInvokeContext } = require("./context");
+
 // ─── Method names — keep in sync with matrix/src/executa/protocol.py ──
 
 const METHOD_STORAGE_GET = "storage/get";
@@ -111,7 +113,7 @@ class _BaseRpcClient {
           jsonrpc: "2.0",
           id: reqId,
           method,
-          params,
+          params: attachInvokeContext(params),
         });
       } catch (err) {
         clearTimeout(timer);

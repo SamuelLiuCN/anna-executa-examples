@@ -100,6 +100,18 @@ session:
 
 1. **create** — mints an agent session (`submode: "auto"`) and drops its
    `app_session_uuid` into the editable uuid box.
+
+   Expand **Session tools** to control the session's tool surface — and
+   therefore the **prompt weight**. Inheriting the full host kit can put
+   hundreds of tool definitions (~100K tokens) in front of every model
+   call, slowing runs and burning quota. Uncheck *inherit* to create a
+   **sandbox** session via create-time `quotaCaps`
+   (`{inherit_host_tools: false, allowed_tools: […]}`): the resolved set is
+   *platform public app tools ∩ your user grant ∩ your list* (e.g.
+   `web_search`); an empty list ⇒ a text-only agent. HOST API transport
+   only — Reverse-RPC sessions are minted via sampling and inherit by
+   default. The `tools:` line under the uuid box shows the
+   runtime-accurate resolved surface.
 2. **run** — streams tokens into the output area. Expand **Per-run model
    preferences** to send MCP `modelPreferences` with the run — applied to
    that run only (sessions never pin a model) and forwarded on **both**
@@ -109,6 +121,28 @@ session:
    preference: the host substring-matches the hint against active models
    and falls back to your saved model on a miss — the run never fails
    because of it.
+
+   Expand **Per-run image attachments** to send images as **native
+   multimodal inputs**: the session's model sees them directly in the same
+   inference as your prompt — no `upload_local_file` → `analyze_image` tool
+   round-trip, no lossy text description in between. Provide a public
+   HTTPS URL and/or pick a local file. Local files follow the
+   **upload-first best practice**: the demo uploads them via
+   `anna.upload.inline` (host storage → short-lived URL) and passes the
+   returned `url` in the attachment — keeping the run payload small and
+   the stored object reusable — falling back to inline base64 `data` only
+   when the upload grant is unavailable. Constraints enforced host-side:
+   image MIME types only, ≤ 6 per run, ≤ 20 MB each, SSRF-guarded URLs.
+   The model must be **vision-capable** or the run fails fast with
+   `APP_MODEL_NOT_VISION_CAPABLE` — pair with the model hint (e.g.
+   `gemini`) to pick one. Images are visible for **that run only**;
+   re-attach if a later turn needs to look again. Forwarded on **both**
+   transports (`run({attachments})` over the HOST API; a structured
+   `attachments` array over the Reverse RPC `agent_session` tool).
+
+   The **Allowed tools (this run)** field narrows a single run's tool
+   surface further (`allowed_tools`) — sandbox sessions only; inherit
+   sessions keep the full host kit regardless.
 3. **cancel** — cancels the most recent run (`run_id` tracked from the
    stream).
 4. **history** — fetches the recorded transcript.

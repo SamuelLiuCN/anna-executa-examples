@@ -35,6 +35,8 @@
 
 const crypto = require("node:crypto");
 
+const { attachInvokeContext } = require("./context");
+
 const METHOD_HOST_UPLOAD_FILE = "host/uploadFile";
 
 const UPLOAD_ERR_NOT_GRANTED = -32201;
@@ -242,7 +244,7 @@ class HostUploadClient {
           jsonrpc: "2.0",
           id: reqId,
           method,
-          params,
+          params: attachInvokeContext(params),
         });
       } catch (err) {
         clearTimeout(timer);

@@ -52,6 +52,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
+from .context import attach_invoke_context
 from .sampling import _write_frame
 
 
@@ -314,7 +315,7 @@ class ImageClient:
             "jsonrpc": "2.0",
             "id": req_id,
             "method": method,
-            "params": params,
+            "params": attach_invoke_context(params),
         }
         try:
             self._write_frame(envelope)

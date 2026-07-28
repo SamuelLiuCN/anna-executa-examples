@@ -16,9 +16,13 @@
         (<code>submode: "fixed"</code>), discover the workspace root and use
         <strong>absolute paths only</strong>, verify writes with a
         <strong>nonce read-back</strong> instead of trusting completion
-        claims, and treat structured filesystem errors
+        claims, treat structured filesystem errors
         (<code>PATH_OUTSIDE_SANDBOX</code> / <code>NOT_FOUND</code>) as a
-        stop signal — never a cue to fall back to a similar path.
+        stop signal — never a cue to fall back to a similar path — and
+        <strong>classify every terminal state</strong>: retry on
+        <code>empty_completion</code>, treat <code>task_cancelled</code> as an
+        outcome, and rely on <code>cancel</code>/<code>delete</code> to really
+        stop runaway runs.
       </p>
     </header>
 
@@ -135,7 +139,21 @@
     </section>
 
     <section>
-      <h2>3. Freeform run</h2>
+      <h2>3. Freeform run · cancel · terminal-state handling</h2>
+      <p class="muted">
+        Every run ends in exactly one classified state: streamed text · an
+        in-run error frame (<code>{event:"sse", error, error_type}</code> —
+        <code>empty_completion</code> means the model returned <em>nothing</em>
+        and is retried once here, forum <code>/t/191</code>) · a gate error
+        (<code>{event:"error", code}</code>, e.g. <code>queue_timeout</code>)
+        · or <code>task_cancelled</code>. <strong>cancel</strong> records a
+        signal keyed by <code>run_id</code>: a queued run is dropped before it
+        starts, a running run stops at the next checkpoint — confirm via the
+        stream's <code>task_cancelled</code> + <code>end</code> frames.
+        <strong>delete</strong> (section 1) also cancels all active runs of
+        the session. In mock mode, send the text
+        <code>EMPTY_COMPLETION_DEMO</code> to see the retry path.
+      </p>
       <textarea id="run-input" rows="2">List the files at your workspace root. Reply with their canonical absolute paths.</textarea>
       <div class="btn-row">
         <button id="run-btn" disabled>run (streamed)</button>

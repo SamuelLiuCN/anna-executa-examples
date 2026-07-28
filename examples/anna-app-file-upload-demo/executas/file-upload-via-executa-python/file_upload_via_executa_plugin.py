@@ -71,6 +71,7 @@ from executa_sdk import (  # noqa: E402
     PROTOCOL_VERSION_V2,
     HostUploadClient,
     UploadError,
+    bind_invoke,
     make_response_router,
 )
 
@@ -326,7 +327,16 @@ def _handle_invoke(req_id: Any, params: dict) -> None:
         _err(req_id, -32601, f"Unknown tool: {tool}")
         return
 
-    fut = asyncio.run_coroutine_threadsafe(coro, _loop)
+    # Correlate reverse RPCs (host/uploadFile negotiate/confirm) with THIS
+    # invoke via params.context.invoke_id — required when the host runs
+    # multiple invokes concurrently (forum #188). contextvars don't cross
+    # the thread hop of run_coroutine_threadsafe, so bind INSIDE the
+    # coroutine that runs on the SDK event loop.
+    async def _run_bound() -> dict:
+        with bind_invoke(params):
+            return await coro
+
+    fut = asyncio.run_coroutine_threadsafe(_run_bound(), _loop)
     try:
         data = fut.result(timeout=300.0)
     except UploadError as e:

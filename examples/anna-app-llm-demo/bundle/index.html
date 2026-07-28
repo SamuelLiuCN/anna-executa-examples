@@ -158,6 +158,41 @@
         systemPrompt (if passed to run) still wins; the platform safety floor
         always applies on top.
       </p>
+      <details class="params">
+        <summary>Session tools (create-time <code>quotaCaps</code>)</summary>
+        <p class="muted">
+          Controls the session's tool surface — and therefore the
+          <strong>prompt weight</strong>: inheriting the full host kit can put
+          hundreds of tool definitions (~100K tokens) in front of every model
+          call, which slows runs down and burns quota. Uncheck to create a
+          <strong>sandbox</strong> session limited to the listed platform app
+          tools (resolved as: platform public app tools ∩ your user grant ∩
+          this list; e.g. <code>web_search</code>). An empty list ⇒ text-only
+          agent (no side effects). HOST API transport only — Reverse-RPC
+          sessions are minted via sampling and inherit by default.
+        </p>
+        <div class="mode-row">
+          <label for="sess-inherit">
+            <input id="sess-inherit" type="checkbox" checked />
+            inherit ALL host tools (heavy prompt)
+          </label>
+        </div>
+        <div class="mode-row">
+          <label for="sess-allowed-tools">Sandbox tools:</label>
+          <input
+            id="sess-allowed-tools"
+            type="text"
+            class="text-input"
+            placeholder="comma-separated, e.g. web_search (used when inherit is off)"
+          />
+          <button id="catalog-btn" type="button">catalog</button>
+        </div>
+        <p class="muted" id="catalog-out">
+          Click <strong>catalog</strong> to discover the platform-tool universe
+          (<code>anna.agent.session.catalog()</code>) — which names are legal
+          here, and per-tool <code>blocked_by</code> diagnostics.
+        </p>
+      </details>
       <div class="btn-row">
         <button id="session-create-btn">create</button>
         <input
@@ -197,6 +232,48 @@
           <label for="run-intel">Intelligence priority:</label>
           <input id="run-intel" type="number" min="0" max="1" step="0.1" placeholder="—" class="num-input" />
         </div>
+        <div class="mode-row">
+          <label for="run-allowed-tools">Allowed tools (this run):</label>
+          <input
+            id="run-allowed-tools"
+            type="text"
+            class="text-input"
+            placeholder="comma-separated subset of session tools — sandbox sessions only"
+          />
+        </div>
+      </details>
+      <details class="params">
+        <summary>Per-run image attachments (native multimodal)</summary>
+        <p class="muted">
+          Attach images so the session's model <strong>sees them directly</strong>
+          in the same inference as your prompt — no
+          <code>upload_local_file</code> → <code>analyze_image</code> tool
+          round-trip. Image MIME types only, max 6 per run; a URL must be
+          public HTTPS. Requires a <strong>vision-capable model</strong>: a
+          text-only model fails fast with
+          <code>APP_MODEL_NOT_VISION_CAPABLE</code> — pair with the model hint
+          above (e.g. <code>gemini</code>) to pick a vision model. Images are
+          visible for <strong>this run only</strong>; re-attach if a later turn
+          needs to look again. Forwarded on <strong>both</strong> transports
+          (HOST API <code>run({attachments})</code> and Reverse RPC
+          <code>agent_session(op=run, attachments)</code>).
+        </p>
+        <div class="mode-row">
+          <label for="run-img-url">Image URL:</label>
+          <input id="run-img-url" type="text" class="text-input" placeholder="https://… (public)" />
+        </div>
+        <div class="mode-row">
+          <label for="run-img-file">Local file:</label>
+          <input id="run-img-file" type="file" accept="image/*" />
+        </div>
+        <p class="muted">
+          Local files follow the best-practice flow: uploaded first via
+          <code>anna.upload.inline</code> (host storage → short-lived URL),
+          then referenced by <code>url</code> in the attachment — keeping the
+          run payload small and the image reusable across calls. If the
+          upload grant is unavailable the demo falls back to inline base64
+          <code>data</code> (the host uploads it server-side).
+        </p>
       </details>
       <textarea id="run-input" rows="2">What is 12 × 13?</textarea>
       <div class="btn-row">

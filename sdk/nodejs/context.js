@@ -103,4 +103,77 @@ class InvokeContext {
   }
 }
 
-module.exports = { InvokeContext };
+// ─── Current-invoke propagation (reverse-RPC correlation) ─────────────
+//
+// The host Agent associates every reverse RPC (host/uploadFile,
+// storage/*, image/*, sampling/createMessage, …) with its parent
+// ``invoke`` via ``params.context.invoke_id``. When a plugin handles
+// multiple invokes CONCURRENTLY, omitting the field forces the host to
+// guess — which intermittently attributes the reverse RPC to the wrong
+// invoke (forum #188: negotiate/confirm r2_key ownership failures).
+//
+// Wrap your tool handler in :func:`bindInvoke` and every SDK client
+// automatically stamps outgoing reverse RPCs:
+//
+//   const { bindInvoke } = require("@anna/executa-sdk");
+//
+//   async function handleInvoke(reqId, params) {
+//     return bindInvoke(params, async () => {
+//       ... // any SDK reverse-RPC call made here is correlated
+//     });
+//   }
+
+const { AsyncLocalStorage } = require("node:async_hooks");
+
+const _currentInvoke = new AsyncLocalStorage();
+
+/**
+ * Run `fn` with the current invoke bound (AsyncLocalStorage scope).
+ *
+ * @template T
+ * @param {object|string|null} paramsOrInvokeId — the raw `invoke` request
+ *   params (invoke_id extracted via `InvokeContext.fromParams`) or an
+ *   invoke_id string.
+ * @param {() => T} fn
+ * @returns {T}
+ */
+function bindInvoke(paramsOrInvokeId, fn) {
+  const invokeId =
+    typeof paramsOrInvokeId === "string" || paramsOrInvokeId == null
+      ? paramsOrInvokeId || null
+      : InvokeContext.fromParams(paramsOrInvokeId).invokeId;
+  return _currentInvoke.run(invokeId, fn);
+}
+
+/** @returns {string|null} the invoke_id bound to the current async scope. */
+function getCurrentInvokeId() {
+  return _currentInvoke.getStore() ?? null;
+}
+
+/**
+ * Stamp `params.context.invoke_id` from the current binding. Used by
+ * every SDK reverse-RPC client just before writing the request frame.
+ * No-op when nothing is bound or the caller already set it. Mutates and
+ * returns `params`.
+ *
+ * @param {object} params
+ * @returns {object}
+ */
+function attachInvokeContext(params) {
+  const invokeId = getCurrentInvokeId();
+  if (!invokeId || !params || typeof params !== "object") return params;
+  if (!params.context || typeof params.context !== "object") {
+    params.context = {};
+  }
+  if (params.context.invoke_id == null) {
+    params.context.invoke_id = invokeId;
+  }
+  return params;
+}
+
+module.exports = {
+  InvokeContext,
+  bindInvoke,
+  getCurrentInvokeId,
+  attachInvokeContext,
+};

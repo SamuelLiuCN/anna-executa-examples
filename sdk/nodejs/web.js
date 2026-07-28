@@ -35,6 +35,8 @@
 
 const crypto = require("node:crypto");
 
+const { attachInvokeContext } = require("./context");
+
 const METHOD_WEB_SEARCH = "web/search";
 const METHOD_WEB_FETCH = "web/fetch";
 // Phase 2 (app-web-search.md §2.3 / §2.4)
@@ -264,7 +266,7 @@ class WebClient {
           jsonrpc: "2.0",
           id: reqId,
           method,
-          params,
+          params: attachInvokeContext(params),
         });
       } catch (err) {
         clearTimeout(timer);

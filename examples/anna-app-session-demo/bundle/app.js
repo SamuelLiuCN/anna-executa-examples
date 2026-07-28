@@ -1,7 +1,8 @@
 // Agent Session Demo — workspace file-editing best practices over
-// anna.agent.session.* (forum /t/174 path determinism, /t/86 zero-tools).
+// anna.agent.session.* (forum /t/174 path determinism, /t/86 zero-tools,
+// /t/191 empty completions + working cancel).
 //
-// The four practices demonstrated:
+// The five practices demonstrated:
 //   1. PIN the session to one filesystem client (submode "fixed" +
 //      fixed_client_id) so every run targets the same workspace root.
 //   2. DISCOVER the workspace root first; afterwards every instruction
@@ -10,6 +11,11 @@
 //      in app code. A "task completed" claim is not proof the file changed.
 //   4. STOP on structured tool errors (error_code PATH_OUTSIDE_SANDBOX /
 //      NOT_FOUND + sandbox_root) — never fall back to a similar path.
+//   5. CLASSIFY the terminal state of every run: consume in-run error
+//      frames ({event:"sse", error, error_type}) — empty_completion is a
+//      retryable infrastructure error, NOT a business failure — and treat
+//      task_cancelled as a distinct outcome. session.cancel(run_id) really
+//      stops queued and running runs; session.delete cancels all of them.
 //
 // This bundle is loaded as a native ES module and imports the Anna App
 // Runtime SDK directly. `.connect()` performs the host handshake.
@@ -61,7 +67,7 @@ const annaReady = (async () => {
 });
 
 function showError(label, err) {
-  const code = (err && (err.code || err.error?.code)) || "unknown";
+  const code = (err && (err.errorType || err.code || err.error?.code)) || "unknown";
   const name = (err && (err.name || err.error?.name)) || "";
   const msg = (err && (err.message || err.error?.message)) || String(err);
   let hint = "";
@@ -69,6 +75,10 @@ function showError(label, err) {
     hint = " — session is gone; create a new one.";
   } else if (name === "APP_SESSION_TOKEN_EXPIRED") {
     hint = " — token lapsed; click refresh or just retry.";
+  } else if (err && err.errorType === "empty_completion") {
+    hint = " — infrastructure hiccup (model returned nothing); retry or pick another model.";
+  } else if (name === "APP_CONCURRENCY_LIMIT" || (err && err.code === "APP_CONCURRENCY_LIMIT")) {
+    hint = " — you already have the max number of concurrent agent runs (10/user); wait for one to finish or cancel it, then retry.";
   }
   errBox.textContent = `[${label}] ${name || code}: ${msg}${hint}`;
 }
@@ -225,13 +235,16 @@ $("delete-btn").addEventListener("click", async () => {
   clearError();
   try {
     const handle = await hostHandle();
+    // delete revokes the session AND cancels all of its active runs
+    // (queued runs are dropped, running runs stop at the next checkpoint)
+    // — no need to cancel() each run_id first for a clean teardown.
     await handle.delete();
     sess.handle = null;
     sess.runId = null;
     setUuid("");
     renderLifecycle(null);
     renderToolSurface(null);
-    $("setup-out").textContent = "(session deleted)";
+    $("setup-out").textContent = "(session deleted — active runs cancelled)";
   } catch (err) {
     showError("agent.session.delete", err);
   }
@@ -280,8 +293,31 @@ $("list-btn").addEventListener("click", async () => {
 
 // ── shared run helper ─────────────────────────────────────────────────────
 
+// A run that ends without any output/tool activity is surfaced by the host
+// as an in-run error frame with this error_type (forum /t/191). It means
+// the upstream model returned an empty completion — infrastructure, not
+// "the agent chose to do nothing" — so the right app reaction is retry /
+// switch model, NOT a business-level failure like "file not modified".
+const EMPTY_COMPLETION = "empty_completion";
+
+class RunError extends Error {
+  constructor(message, { errorType, code, cancelled = false } = {}) {
+    super(message);
+    this.name = "RunError";
+    this.errorType = errorType || null; // in-run: quota_exhausted, empty_completion, …
+    this.code = code || null;           // gate/infra: queue_timeout, session_revoked, …
+    this.cancelled = cancelled;
+  }
+}
+
 // Streams one run into outEl (prompt echoed first) and resolves with the
 // concatenated token text — the walkthrough steps parse JSON out of it.
+// Classifies EVERY way a run can terminate (practice 5):
+//   • assistant text        → collected + returned
+//   • {event:"sse", error}  → RunError with errorType (empty_completion …)
+//   • {event:"error"}       → RunError with code (queue_timeout …)
+//   • delta.task_cancelled  → RunError with cancelled=true
+//   • delta.task_complete   → usage line (proof the run really billed work)
 async function runAndCollect(prompt, outEl) {
   const handle = await hostHandle();
   outEl.textContent = `>>> prompt:\n${prompt}\n\n<<< reply:\n`;
@@ -289,19 +325,32 @@ async function runAndCollect(prompt, outEl) {
   const stream = handle.run({ content: prompt });
   for await (const frame of stream) {
     if (frame.run_id) sess.runId = frame.run_id;
-    if (frame.event === "run_meta") {
+    if (frame.event === "queued" || frame.event === "started") {
+      outEl.textContent += `[${frame.event}]\n`;
+    } else if (frame.event === "run_meta") {
       handleRunMeta(frame, outEl);
     } else if (frame.event === "sse") {
-      // Token frames are tagged event:"sse" and carry an OpenAI-style
-      // chunk — streamed text lives at choices[0].delta.content. (There is
-      // no {event:"token"} frame on the real host; see docs llm-and-agent.md.)
+      // In-run error frames ride the sse envelope: {error, error_type}.
+      if (frame.error) {
+        throw new RunError(frame.error, { errorType: frame.error_type });
+      }
+      // Token frames carry an OpenAI-style chunk — streamed text lives at
+      // choices[0].delta.content. (There is no {event:"token"} frame on
+      // the real host; see docs llm-and-agent.md.)
       const delta = frame.choices?.[0]?.delta;
       if (typeof delta?.content === "string" && delta.content) {
         text += delta.content;
         outEl.textContent += delta.content;
+      } else if (delta?.task_cancelled) {
+        throw new RunError(delta.task_cancelled.reason || "run cancelled", {
+          cancelled: true,
+        });
+      } else if (delta?.task_complete) {
+        const u = delta.task_complete.token_usage;
+        if (u) outEl.textContent += `\n[usage] tokens=${u.total_tokens ?? "?"}`;
       }
     } else if (frame.event === "error") {
-      throw new Error(frame.message || "run error");
+      throw new RunError(frame.message || "run error", { code: frame.code });
     }
   }
   if (stream.runId) sess.runId = stream.runId;
@@ -439,23 +488,46 @@ $("probe-btn").addEventListener("click", async () => {
   }
 });
 
-// ── freeform run / cancel ─────────────────────────────────────────────────
+// ── freeform run / cancel / empty-completion handling ─────────────────────
 
+// Practice 5 in action: one retry on empty_completion (an infrastructure
+// hiccup — the model returned nothing), and cancellation rendered as a
+// distinct outcome instead of an error. Anything else is a real error.
 $("run-btn").addEventListener("click", async () => {
   clearError();
-  try {
-    await runAndCollect($("run-input").value || "hello", $("run-out"));
-  } catch (err) {
-    showError("agent.session.run", err);
+  const outEl = $("run-out");
+  const prompt = $("run-input").value || "hello";
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await runAndCollect(prompt, outEl);
+      return;
+    } catch (err) {
+      if (err instanceof RunError && err.cancelled) {
+        outEl.textContent += `\n\n[cancelled] ${err.message} — the host stopped the run (task_cancelled + end frames). Not an error.`;
+        return;
+      }
+      if (err instanceof RunError && err.errorType === EMPTY_COMPLETION && attempt === 1) {
+        outEl.textContent += `\n\n[${EMPTY_COMPLETION}] ${err.message}\n[app] retryable infrastructure error — retrying once…\n`;
+        continue;
+      }
+      showError("agent.session.run", err);
+      return;
+    }
   }
 });
 
+// session.cancel(run_id) is honoured server-side: a still-queued run is
+// dropped before it starts; a running run stops at the next poll checkpoint
+// (an in-flight provider call finishes first). {cancelled:true} is the ack
+// that the signal was recorded — watch the STREAM for task_cancelled + end
+// to confirm the actual stop.
 $("cancel-btn").addEventListener("click", async () => {
   clearError();
   try {
     const handle = await hostHandle();
     const res = await handle.cancel(sess.runId || undefined);
-    $("run-out").textContent = JSON.stringify(res, null, 2);
+    $("run-out").textContent +=
+      `\n\n[cancel] ${JSON.stringify(res)} — signal recorded; the run's stream terminates with task_cancelled + end.`;
   } catch (err) {
     showError("agent.session.cancel", err);
   }

@@ -40,6 +40,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
+from .context import attach_invoke_context as _attach_invoke_context
+
 
 # ─── Constants — keep in sync with matrix/src/executa/protocol.py ─────
 
@@ -242,7 +244,7 @@ class SamplingClient:
             "jsonrpc": "2.0",
             "id": req_id,
             "method": METHOD_SAMPLING_CREATE_MESSAGE,
-            "params": params,
+            "params": _attach_invoke_context(params),
         }
         try:
             self._write_frame(envelope)

@@ -55,6 +55,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Optional
 
+from .context import attach_invoke_context
 from .sampling import _write_frame
 
 
@@ -315,7 +316,7 @@ class HostUploadClient:
             "jsonrpc": "2.0",
             "id": req_id,
             "method": method,
-            "params": params,
+            "params": attach_invoke_context(params),
         }
         try:
             self._write_frame(envelope)

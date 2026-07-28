@@ -44,7 +44,7 @@ const transportHint = $("transport-hint");
 const TRANSPORT_HINTS = {
   host: "Calls the host session API directly from the iframe (anna.agent.session.*). 'list' uses the account/app-scoped anna.agent.session.list(); run/cancel/history/delete act on whatever app_session_uuid is in the box — anna.agent.session.attach(uuid) re-binds an existing session (e.g. one picked from list()) without minting a new one.",
   executa:
-    "Drives sessions through the bundled Executa: anna.tools.invoke → agent_session(op) → reverse-RPC agent/session.*. Requires --real LLM bridge for run; mock fixtures do not serve reverse sampling.",
+    "Drives sessions through the bundled Executa: anna.tools.invoke → agent_session(op) → reverse-RPC agent/session.*. Requires --real LLM bridge for run; mock fixtures do not serve reverse sampling. Runs are BUFFERED inside one invoke (180s hard cap) — prefer the HOST API transport for long tool-using / image runs.",
 };
 
 // Unified session state across both transports.
@@ -541,25 +541,75 @@ async function hostHandle() {
 }
 
 // Reverse RPC helper: invoke the bundled plugin's agent_session tool.
-async function executaSession(op, args = {}) {
+// `timeoutMs` (optional) extends the deadline for long ops (agent runs):
+// it goes INTO the invoke payload (server clamps to
+// ANNA_APP_TOOLS_INVOKE_TIMEOUT_MAX_MS, 180s) AND into the SDK per-call
+// opts (local JSON-RPC timer, kept slightly above the server deadline).
+async function executaSession(op, args = {}, timeoutMs = undefined) {
   const anna = await annaReady;
-  const reply = await anna.tools.invoke({
+  const payload = {
     tool_id: EXECUTA_TOOL_ID,
     method: "agent_session",
     args: { op, ...args },
-  });
+  };
+  let opts;
+  if (timeoutMs !== undefined) {
+    payload.timeoutMs = timeoutMs;
+    opts = { timeoutMs: timeoutMs + 5000 };
+  }
+  const reply = await anna.tools.invoke(payload, opts);
   // tools.invoke unwraps to the tool's `data` payload.
   return reply;
 }
 
-$("session-create-btn").addEventListener("click", async () => {
+// Pre-create discovery: which platform tools exist, and which would resolve
+// for THIS app (legal values for quotaCaps.allowed_tools / per-run
+// allowed_tools). Read-only — mints no session. blocked_by pinpoints the
+// failing gate: "manifest" → declare in ui.host_api.agent.tools; "user_grant"
+// → enable in the app's Permissions modal. Requires host dispatcher ≥ 0.18.0.
+$("catalog-btn")?.addEventListener("click", async () => {
   clearError();
+  const out = $("catalog-out");
+  out.textContent = "(loading catalog…)";
   try {
     const anna = await annaReady;
-    const systemPrompt = ($("session-system-prompt").value || "").trim() || undefined;
+    const cat = await anna.agent.session.catalog();
+    const lines = (cat.platform_tools || []).map((t) =>
+      t.eligible
+        ? `✅ ${t.name} — eligible`
+        : `🚫 ${t.name} — blocked_by: ${t.blocked_by}`,
+    );
+    lines.push(
+      `inherit_host_tools_granted: ${cat.inherit_host_tools_granted ? "yes" : "no"}`,
+    );
+    out.textContent = lines.join("  ·  ");
+  } catch (err) {
+    out.textContent = "(catalog unavailable — host < dispatcher 0.18.0?)";
+    showError("agent.session.catalog", err);
+  }
+});
+
+$("session-create-btn").addEventListener("click", async () => {
+    // Session tool surface (create-time quotaCaps). Inheriting the full host
+    // kit can put hundreds of tool definitions (~100K tokens) in front of
+    // every model call — uncheck "inherit" for a lean sandbox session whose
+    // tool list (∩ platform public app tools ∩ user grant) you control.
+    const inherit = $("sess-inherit")?.checked ?? true;
+    let quotaCaps;
+    if (!inherit) {
+      const tools = ($("sess-allowed-tools")?.value || "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      quotaCaps = { inherit_host_tools: false, allowed_tools: tools };
+    }
     let uuid;
     if (transport() === "host") {
-      sess.handle = await anna.agent.session({ submode: "auto", system_prompt: systemPrompt });
+      sess.handle = await anna.agent.session({
+        submode: "auto",
+        system_prompt: systemPrompt,
+        ...(quotaCaps ? { quotaCaps } : {}),
+      });
       uuid = sess.handle.app_session_uuid || null;
       // The handle carries lifecycle metadata (expires_at / max_lifetime_at /
       // idle_ttl_seconds) straight off the create response, plus the
@@ -568,6 +618,8 @@ $("session-create-btn").addEventListener("click", async () => {
       renderLifecycle(sess.handle);
       renderToolSurface(sess.handle);
     } else {
+      // Reverse-RPC sessions are minted via sampling_token and inherit the
+      // host kit by default — quotaCaps editing is a HOST API-only knob here.
       const r = await executaSession("create", { submode: "auto", system_prompt: systemPrompt });
       sess.handle = null;
       uuid = r.app_session_uuid || null;
@@ -603,6 +655,76 @@ function readRunModelPreferences() {
   return Object.keys(mp).length ? mp : undefined;
 }
 
+// Per-run native image attachments (forum #171) — the session's model sees
+// the images DIRECTLY in the same inference as the prompt (no
+// upload_local_file → analyze_image round-trip). Shape mirrors the main-chat
+// Attachment: {type, url | data, filename?, detail?}. Server enforces:
+// image/* only, ≤ 6 per run, 20MB each, public-HTTPS urls (SSRF guard), and
+// a vision-capable model (APP_MODEL_NOT_VISION_CAPABLE otherwise — use the
+// model hint above to pick one). Images are visible for THIS run only.
+function guessImageMime(url) {
+  const ext = (url.split(/[?#]/)[0].split(".").pop() || "").toLowerCase();
+  return (
+    {
+      jpg: "image/jpeg",
+      jpeg: "image/jpeg",
+      png: "image/png",
+      gif: "image/gif",
+      webp: "image/webp",
+      bmp: "image/bmp",
+      svg: "image/svg+xml",
+    }[ext] || "image/png"
+  );
+}
+
+async function readRunAttachments() {
+  const atts = [];
+  const url = ($("run-img-url")?.value || "").trim();
+  if (url) atts.push({ type: guessImageMime(url), url });
+  const file = $("run-img-file")?.files?.[0];
+  if (file) {
+    // Best practice for local files: upload FIRST via anna.upload.inline
+    // (host storage → short-lived download URL), then reference by `url`.
+    // Keeps the run payload small and the stored object reusable. Falls
+    // back to inline base64 `data` when the upload grant is unavailable
+    // (the host then uploads it server-side).
+    const dataUrl = await new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result);
+      r.onerror = () => reject(r.error || new Error("file read failed"));
+      r.readAsDataURL(file);
+    });
+    const b64 = String(dataUrl).split(",", 2)[1] || "";
+    const mime = file.type || "image/png";
+    try {
+      const anna = await annaReady;
+      const up = await anna.upload.inline({
+        filename: file.name,
+        mime_type: mime,
+        content_b64: b64,
+      });
+      const uploadedUrl = up && (up.url || up.download_url);
+      if (!uploadedUrl) throw new Error("upload.inline returned no url");
+      atts.push({ type: mime, url: uploadedUrl, filename: file.name });
+    } catch (err) {
+      console.warn("upload.inline unavailable, falling back to base64 data:", err);
+      atts.push({ type: mime, data: dataUrl, filename: file.name });
+    }
+  }
+  return atts.length ? atts : undefined;
+}
+
+// Per-run tool subset — narrows THIS run's tool surface (and prompt weight)
+// to a comma-separated list of session-granted tools. Sandbox sessions only:
+// inherit-host-tools sessions keep the full host kit regardless.
+function readRunAllowedTools() {
+  const raw = ($("run-allowed-tools")?.value || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return raw.length ? raw : undefined;
+}
+
 $("run-btn").addEventListener("click", async () => {
   clearError();
   clearStats("run-stats");
@@ -610,6 +732,14 @@ $("run-btn").addEventListener("click", async () => {
   if (!uuid) return;
   const content = $("run-input").value || "hello";
   const modelPreferences = readRunModelPreferences();
+  const allowedTools = readRunAllowedTools();
+  let attachments;
+  try {
+    attachments = await readRunAttachments();
+  } catch (err) {
+    showError("attachments.read", err);
+    return;
+  }
   runOut.textContent = "(streaming…)\n";
   const t0 = now();
   let firstFrame = null; // queue + agent startup latency
@@ -623,6 +753,8 @@ $("run-btn").addEventListener("click", async () => {
       const stream = handle.run({
         content,
         ...(modelPreferences ? { modelPreferences } : {}),
+        ...(attachments ? { attachments } : {}),
+        ...(allowedTools ? { allowed_tools: allowedTools } : {}),
       });
       for await (const frame of stream) {
         if (firstFrame == null) firstFrame = now() - t0;
@@ -652,6 +784,7 @@ $("run-btn").addEventListener("click", async () => {
         tokenFrames && genMs > 0 &&
           `~${(tokenFrames / (genMs / 1000)).toFixed(1)} tok-frames/s`,
         modelPreferences && `prefs ${JSON.stringify(modelPreferences)}`,
+        attachments && `🖼 ${attachments.length} image(s) attached natively`,
       ]);
     } else {
       const args = { app_session_uuid: uuid, prompt: content };
@@ -665,7 +798,17 @@ $("run-btn").addEventListener("click", async () => {
         args.speed_priority = modelPreferences.speedPriority;
       if (modelPreferences?.intelligencePriority !== undefined)
         args.intelligence_priority = modelPreferences.intelligencePriority;
-      const r = await executaSession("run", args);
+      // Native image attachments pass through as a structured array — the
+      // plugin forwards them verbatim on agent/session.run.
+      if (attachments) args.attachments = attachments;
+      if (allowedTools) args.allowed_tools = allowedTools;
+      // Buffered transport: the whole agent run happens inside ONE
+      // tools.invoke. The default deadline (65s) is too tight for tool-using
+      // runs (an image turn can exceed it before the buffered response
+      // returns) — request the server-side cap instead. Runs longer than
+      // 180s need the HOST API transport (true streaming, no invoke
+      // deadline).
+      const r = await executaSession("run", args, 180000);
       const total = now() - t0;
       runOut.textContent = (r.text || JSON.stringify(r, null, 2)) + "\n";
       // The reverse-RPC run is buffered — the run_meta frame (tool surface +
@@ -681,6 +824,7 @@ $("run-btn").addEventListener("click", async () => {
         r.elapsed_ms != null && `plugin ${fmtMs(r.elapsed_ms)}`,
         (r.frames || []).length && `${r.frames.length} frames`,
         modelPreferences && `prefs ${JSON.stringify(modelPreferences)}`,
+        attachments && `🖼 ${attachments.length} image(s) attached natively`,
       ]);
     }
   } catch (err) {
