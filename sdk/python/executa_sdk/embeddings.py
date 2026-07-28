@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 # 复用 sampling 模块里已经实现的帧写出（保持单一来源，避免格式漂移）
+from .context import attach_invoke_context
 from .sampling import _write_frame
 
 
@@ -149,7 +150,7 @@ class EmbeddingsClient:
             "jsonrpc": "2.0",
             "id": req_id,
             "method": METHOD_EMBEDDINGS_CREATE,
-            "params": params,
+            "params": attach_invoke_context(params),
         }
         try:
             self._write_frame(envelope)

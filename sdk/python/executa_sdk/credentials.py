@@ -52,6 +52,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
+from .context import attach_invoke_context
 from .sampling import _write_frame
 
 # ─── Method names — keep in sync with matrix/src/executa/protocol.py ──
@@ -206,7 +207,7 @@ class CredentialsClient:
             "jsonrpc": "2.0",
             "id": req_id,
             "method": method,
-            "params": params,
+            "params": attach_invoke_context(params),
         }
         try:
             self._write_frame(envelope)

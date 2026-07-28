@@ -28,6 +28,8 @@
 
 const crypto = require("node:crypto");
 
+const { attachInvokeContext } = require("./context");
+
 // ─── Constants — keep in sync with matrix/src/executa/protocol.py ─────
 
 const PROTOCOL_VERSION_V1 = "1.1";
@@ -163,7 +165,7 @@ class SamplingClient {
           jsonrpc: "2.0",
           id: reqId,
           method: METHOD_SAMPLING_CREATE_MESSAGE,
-          params: rpcParams,
+          params: attachInvokeContext(rpcParams),
         });
       } catch (err) {
         clearTimeout(timer);

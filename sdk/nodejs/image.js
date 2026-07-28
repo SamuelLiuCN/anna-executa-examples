@@ -43,6 +43,8 @@
 
 const crypto = require("node:crypto");
 
+const { attachInvokeContext } = require("./context");
+
 const METHOD_IMAGE_GENERATE = "image/generate";
 const METHOD_IMAGE_EDIT = "image/edit";
 
@@ -236,7 +238,7 @@ class ImageClient {
           jsonrpc: "2.0",
           id: reqId,
           method,
-          params,
+          params: attachInvokeContext(params),
         });
       } catch (err) {
         clearTimeout(timer);

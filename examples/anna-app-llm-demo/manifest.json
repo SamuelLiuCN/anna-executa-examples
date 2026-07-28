@@ -37,9 +37,10 @@
       "llm": ["complete", "stream"],
       "chat": ["write_message"],
       "window": ["set_title"],
+      "upload": ["inline"],
       "agent": {
         "session": { "auto": true },
-        "tools": []
+        "tools": ["web_search"]
       }
     },
     "csp_overrides": {

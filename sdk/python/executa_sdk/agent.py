@@ -32,6 +32,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
+from .context import attach_invoke_context
 from .sampling import (
     SAMPLING_ERR_NOT_NEGOTIATED,
     SAMPLING_ERR_TIMEOUT,
@@ -109,6 +110,7 @@ class AgentSession:
         run_id: Optional[str] = None,
         system_prompt: Optional[str] = None,
         model_preferences: Optional[dict] = None,
+        allowed_tools: Optional[List[str]] = None,
         timeout: float = 300.0,
     ) -> AsyncIterator[dict]:
         """Run one agent turn and yield each SSE frame from the host.
@@ -129,6 +131,10 @@ class AgentSession:
         host substring-matches hints against its active models and falls
         back to the user's saved model when nothing matches — it never
         fails the run. Same semantics as ``sampling/createMessage``.
+
+        ``allowed_tools`` (optional) narrows THIS run's tool surface to a
+        subset of the session's granted tools (sandbox sessions only —
+        inherit-host-tools sessions keep the full host kit regardless).
         """
         if self._client is None:
             raise RuntimeError("AgentSession was not created via AgentSessionClient")
@@ -143,6 +149,8 @@ class AgentSession:
             body["systemPrompt"] = system_prompt
         if model_preferences:
             body["modelPreferences"] = model_preferences
+        if allowed_tools:
+            body["allowed_tools"] = list(allowed_tools)
         result = await self._client._call(
             METHOD_AGENT_SESSION_RUN,
             body,
@@ -276,7 +284,7 @@ class AgentSessionClient:
         future: asyncio.Future[dict] = loop.create_future()
         with self._lock:
             self._pending[req_id] = _Pending(future=future)
-        envelope = {"jsonrpc": "2.0", "id": req_id, "method": method, "params": clean}
+        envelope = {"jsonrpc": "2.0", "id": req_id, "method": method, "params": attach_invoke_context(clean)}
         try:
             self._write_frame(envelope)
         except Exception:

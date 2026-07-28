@@ -12,7 +12,7 @@ coexist, workspace roots differ per machine
 into the **wrong workspace** — or writing **nothing at all** while
 claiming success (forum `/t/174`, `/t/86`).
 
-The app demonstrates the four practices that prevent this:
+The app demonstrates the five practices that prevent this:
 
 ## 1. Pin the session to one filesystem client
 
@@ -95,6 +95,32 @@ path to a relative one, guessing a different root, or "helpfully"
 opening a similarly named directory (which is how historical task
 workspaces get corrupted).
 
+## 5. Classify every terminal state — and cancel for real
+
+A run's stream ends in exactly one of these states, and the app
+handles each one distinctly (forum `/t/191`):
+
+| Frame | Meaning | App reaction |
+| --- | --- | --- |
+| `{event:"sse", choices:[{delta:{content}}]}` | streamed text | collect |
+| `{event:"sse", choices:[{delta:{task_complete:{token_usage}}}]}` | success marker | show usage — proof real work was billed |
+| `{event:"sse", error, error_type:"empty_completion", is_retryable:true}` | model returned **nothing** (no text, no tool call) | **retry once / switch model** — infrastructure, not a business failure |
+| `{event:"sse", error, error_type:…}` | quota / recursion / provider error | surface with type |
+| `{event:"error", code}` | gate error (`queue_timeout`, `session_revoked`, …) | surface with code |
+| `{event:"sse", choices:[{delta:{task_cancelled}}]}` | run was cancelled | distinct outcome, not an error |
+| `{event:"end"}` | terminal, always exactly once | stop reading |
+
+The host guarantees a run can never end as an **empty success**: a
+run with zero assistant output and zero tool calls is converted into
+the `empty_completion` error frame server-side, so "succeeded but
+nothing happened" is impossible to misread as a page/content bug.
+
+Cancellation is real: `session.cancel(run_id)` drops a still-queued
+run before it starts and stops a running one at its next checkpoint
+(the stream then carries `task_cancelled` + `end`), and
+`session.delete` fans the cancel out to **all** active runs of the
+session — so tearing down on unmount also frees server-side workers.
+
 ---
 
 ## Layout
@@ -133,7 +159,8 @@ Then:
 #   content). No real files are touched — mock mode only smoke-tests
 #   the UI flow. The default nonce (demo-nonce-0001) is what the
 #   canned read-back returns, so "verify" passes; click "randomize"
-#   to see the NOT VERIFIED path.
+#   to see the NOT VERIFIED path. Send the text EMPTY_COMPLETION_DEMO
+#   in the freeform box to see empty_completion classification + retry.
 pnpm dev:mock
 
 # Against a real anna server you've logged into:

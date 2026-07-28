@@ -72,6 +72,13 @@ type InlineRequest struct {
 	Content  []byte
 	Purpose  string
 	Metadata map[string]any
+	// InvokeID correlates this reverse RPC with its parent `invoke`
+	// (params.context.invoke_id). REQUIRED when the plugin serves
+	// multiple invokes concurrently — without it the host cannot tell
+	// which invoke owns the upload and rejects with
+	// MISSING_INVOKE_CONTEXT (forum #188). Falls back to the
+	// client-level SetInvokeID value when empty.
+	InvokeID string
 }
 
 // NegotiateRequest asks the host for a presigned PUT URL.
@@ -81,6 +88,8 @@ type NegotiateRequest struct {
 	SizeBytes int64
 	Purpose   string
 	Metadata  map[string]any
+	// InvokeID — see InlineRequest.InvokeID.
+	InvokeID string
 }
 
 // NegotiateResult is the returned presigned-upload info.
@@ -162,6 +171,7 @@ type Client struct {
 	pending        map[string]*pending
 	disabledReason string
 	defaultTimeout time.Duration
+	invokeID       string
 }
 
 // New constructs a Client. Pass nil to use the default stdout writer.
@@ -181,6 +191,37 @@ func (c *Client) Disable(reason string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.disabledReason = reason
+}
+
+// SetInvokeID sets the default parent-invoke correlation id stamped
+// into `params.context.invoke_id` of every reverse RPC (see
+// InlineRequest.InvokeID). Suits plugins that serve one invoke at a
+// time; concurrent plugins should pass a per-request InvokeID instead.
+func (c *Client) SetInvokeID(invokeID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.invokeID = invokeID
+}
+
+// attachInvokeContext stamps params.context.invoke_id (request value
+// wins over the client default). Mirrors the Python/Node SDK helpers.
+func (c *Client) attachInvokeContext(params map[string]any, invokeID string) {
+	if invokeID == "" {
+		c.mu.Lock()
+		invokeID = c.invokeID
+		c.mu.Unlock()
+	}
+	if invokeID == "" {
+		return
+	}
+	ctx, _ := params["context"].(map[string]any)
+	if ctx == nil {
+		ctx = map[string]any{}
+		params["context"] = ctx
+	}
+	if _, exists := ctx["invoke_id"]; !exists {
+		ctx["invoke_id"] = invokeID
+	}
 }
 
 // UploadInline uploads raw bytes base64-encoded. Resolves to
@@ -207,6 +248,7 @@ func (c *Client) UploadInline(req InlineRequest, timeout time.Duration) (*Confir
 	if req.Metadata != nil {
 		params["metadata"] = req.Metadata
 	}
+	c.attachInvokeContext(params, req.InvokeID)
 	var out ConfirmResult
 	if err := c.call(MethodHostUploadFile, params, timeout, &out); err != nil {
 		return nil, err
@@ -232,6 +274,7 @@ func (c *Client) Negotiate(req NegotiateRequest, timeout time.Duration) (*Negoti
 	if req.Metadata != nil {
 		params["metadata"] = req.Metadata
 	}
+	c.attachInvokeContext(params, req.InvokeID)
 	var out NegotiateResult
 	if err := c.call(MethodHostUploadFile, params, timeout, &out); err != nil {
 		return nil, err
@@ -242,10 +285,17 @@ func (c *Client) Negotiate(req NegotiateRequest, timeout time.Duration) (*Negoti
 
 // Confirm finalises a presigned upload.
 func (c *Client) Confirm(r2Key string, timeout time.Duration) (*ConfirmResult, error) {
+	return c.ConfirmWithInvokeID(r2Key, "", timeout)
+}
+
+// ConfirmWithInvokeID is Confirm with an explicit parent-invoke
+// correlation id (see InlineRequest.InvokeID).
+func (c *Client) ConfirmWithInvokeID(r2Key, invokeID string, timeout time.Duration) (*ConfirmResult, error) {
 	if r2Key == "" {
 		return nil, errors.New("r2_key required")
 	}
 	params := map[string]any{"mode": "confirm", "r2_key": r2Key}
+	c.attachInvokeContext(params, invokeID)
 	var out ConfirmResult
 	if err := c.call(MethodHostUploadFile, params, timeout, &out); err != nil {
 		return nil, err

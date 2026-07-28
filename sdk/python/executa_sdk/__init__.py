@@ -63,7 +63,12 @@ from .web import (  # noqa: F401
     METHOD_WEB_SEARCH,
     METHOD_WEB_FETCH,
 )
-from .context import InvokeContext  # noqa: F401
+from .context import (  # noqa: F401
+    InvokeContext,
+    attach_invoke_context,
+    bind_invoke,
+    get_current_invoke_id,
+)
 
 __all__ = [
     "SamplingClient",
@@ -86,6 +91,9 @@ __all__ = [
     "WebClient",
     "WebError",
     "InvokeContext",
+    "bind_invoke",
+    "get_current_invoke_id",
+    "attach_invoke_context",
     "PROTOCOL_VERSION_V1",
     "PROTOCOL_VERSION_V2",
     "METHOD_INITIALIZE",
