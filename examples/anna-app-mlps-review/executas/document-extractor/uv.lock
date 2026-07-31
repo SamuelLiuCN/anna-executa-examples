@@ -243,7 +243,7 @@ wheels = [
 
 [[package]]
 name = "tool-intern2-document-extractor-u2n2j8x5"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "pillow" },
