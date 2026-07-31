@@ -63,6 +63,12 @@ on:
         description: "Pass --dry-run to anna-app (push/cut only)"
         type: boolean
         default: false
+  push:
+    branches:
+      - main
+      - mpls-review
+    paths:
+      - ".github/workflows/anna-app-publish.yml"
   release:
     # Tag a demo as <slug>-v<version> (e.g. files-via-executa-v0.1.0) to
     # build that one app's binaries and attach them to the Release.
@@ -78,10 +84,17 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  index:
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Anna App publish workflow registered."
+
   # ──────────────────────────────────────────────────────────
   # Resolve the selected app(s) → a JSON matrix of metadata.
   # ──────────────────────────────────────────────────────────
   plan:
+    if: ${{ github.event_name != 'push' }}
     runs-on: ubuntu-latest
     outputs:
       apps: ${{ steps.select.outputs.apps }}
