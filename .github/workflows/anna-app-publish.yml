@@ -50,6 +50,7 @@ on:
           - anna-app-embed-demo
           - anna-app-llm-demo
           - anna-app-focus-flow
+          - anna-app-mlps-review
       lifecycle:
         description: "build = assets only · push = + working draft · cut = + freeze & R2 mirror"
         type: choice
@@ -195,6 +196,7 @@ jobs:
           TOOL_ID: ${{ matrix.app.tool_id }}
           ENTRY: ${{ matrix.app.entry }}
         run: |
+          python -m pip install .
           pyinstaller --onefile --clean --noupx --name "$TOOL_ID" "$ENTRY"
           test -f "dist/$TOOL_ID"
 
@@ -212,16 +214,20 @@ jobs:
           fi
 
       - name: Package (tar.gz + sha256)
-        working-directory: examples/${{ matrix.app.app_dir }}/executas/${{ matrix.app.executa_dir }}/dist
+        working-directory: examples/${{ matrix.app.app_dir }}/executas/${{ matrix.app.executa_dir }}
         env:
           TOOL_ID: ${{ matrix.app.tool_id }}
           PLATFORM: ${{ matrix.platform.name }}
         run: |
-          asset="$TOOL_ID-$PLATFORM.tar.gz"
-          tar czf "$asset" "$TOOL_ID"
-          shasum -a 256 "$asset" > "$asset.sha256"
+          if [ -x ./package_binary.sh ]; then
+            ./package_binary.sh
+          else
+            asset="$TOOL_ID-$PLATFORM.tar.gz"
+            (cd dist && tar czf "$asset" "$TOOL_ID")
+            shasum -a 256 "dist/$asset" > "dist/$asset.sha256"
+          fi
           echo "ASSET_DIR=examples/${{ matrix.app.app_dir }}/executas/${{ matrix.app.executa_dir }}/dist" >> "$GITHUB_ENV"
-          echo "ASSET=$asset" >> "$GITHUB_ENV"
+          echo "ASSET=$TOOL_ID-$PLATFORM.tar.gz" >> "$GITHUB_ENV"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
@@ -274,7 +280,13 @@ jobs:
           from pathlib import Path
           repo, tag, ej = os.environ["REPO"], os.environ["TAG"], os.environ["EJ"]
           p = Path(ej); m = json.loads(p.read_text("utf-8"))
-          bu = m.get("distribution", {}).get("binary_urls", {})
+          distribution = m.setdefault("distribution", {})
+          profiles = distribution.get("profiles") or {}
+          if "binary" in profiles:
+              distribution["active"] = "binary"
+              bu = profiles["binary"].get("binary_urls", {})
+          else:
+              bu = distribution.get("binary_urls", {})
           for asset in bu.values():
               fname = asset["url"].rsplit("/", 1)[-1]
               asset["url"] = f"https://github.com/{repo}/releases/download/{tag}/{fname}"
@@ -294,7 +306,7 @@ jobs:
         if: ${{ github.event.inputs.lifecycle == 'push' || github.event.inputs.lifecycle == 'cut' }}
         working-directory: examples/${{ matrix.app.app_dir }}
         run: |
-          pnpm exec anna-app apps push --json ${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}
+          pnpm exec anna-app apps push --profile binary --json ${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}
 
       - name: Cut version (freeze → R2 mirror)
         if: ${{ github.event.inputs.lifecycle == 'cut' }}

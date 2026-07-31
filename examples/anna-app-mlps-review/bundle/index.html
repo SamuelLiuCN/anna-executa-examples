@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MLPS Review</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="sidebar">
+        <header class="brand">
+          <span class="brand-mark">ML</span>
+          <div>
+            <h1>等保审查工作台</h1>
+            <p id="connection">连接中</p>
+          </div>
+        </header>
+
+        <nav class="side-nav" aria-label="主导航">
+          <button class="side-link active" data-tab="review" type="button">
+            <span class="nav-icon" aria-hidden="true">01</span>
+            <span>审查</span>
+          </button>
+          <button class="side-link" data-tab="records" type="button">
+            <span class="nav-icon" aria-hidden="true">02</span>
+            <span>审查记录</span>
+          </button>
+          <button class="side-link" data-tab="knowledge" type="button">
+            <span class="nav-icon" aria-hidden="true">03</span>
+            <span>知识库</span>
+          </button>
+          <button class="side-link" data-tab="companies" type="button">
+            <span class="nav-icon" aria-hidden="true">04</span>
+            <span>公司管理</span>
+          </button>
+          <button class="side-link" data-tab="projects" type="button">
+            <span class="nav-icon" aria-hidden="true">05</span>
+            <span>项目管理</span>
+          </button>
+        </nav>
+
+        <footer class="sidebar-footer">
+          <span>企业合规辅助审查</span>
+          <strong>MLPS 2.0</strong>
+        </footer>
+      </aside>
+
+      <section class="main-shell">
+        <header class="topbar">
+          <div class="context-selectors" aria-label="当前审查上下文">
+            <label class="context-field">
+              <span>公司</span>
+              <select id="company-select"></select>
+            </label>
+            <label class="context-field">
+              <span>项目</span>
+              <select id="project-select"></select>
+            </label>
+          </div>
+        </header>
+
+        <section class="workspace">
+          <section id="tab-review" class="tab-panel active">
+            <div id="review-empty" class="empty-state" hidden>
+              <h3>先选择公司和项目</h3>
+              <p>审查记录、知识库和报告都会归档到当前公司与项目下。</p>
+              <div class="detail-actions">
+                <button id="empty-company-btn" class="primary compact-action" type="button">创建公司</button>
+                <button id="empty-project-btn" class="ghost" type="button">创建项目</button>
+              </div>
+            </div>
+
+            <div id="review-content" hidden>
+              <div class="review-grid">
+                <div class="panel">
+                  <div class="section-head">
+                    <div>
+                      <p class="eyebrow">文档审查</p>
+                      <h3>上传待审材料</h3>
+                    </div>
+                  </div>
+
+                  <label id="drop-zone" class="drop-zone" for="file-input">
+                    <input id="file-input" type="file" accept=".pdf,.docx,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown" />
+                    <span class="drop-title">选择审查文档</span>
+                    <span id="file-meta" class="drop-meta">PDF / DOCX / TXT / MD，最大 200 MB</span>
+                  </label>
+
+                  <div class="controls">
+                    <label>
+                      <span>保护等级</span>
+                      <select id="level-select">
+                        <option value="三级" selected>三级</option>
+                        <option value="二级">二级</option>
+                        <option value="四级">四级</option>
+                        <option value="一级">一级</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>文档类型</span>
+                      <select id="doc-kind">
+                        <option value="安全管理制度" selected>安全管理制度</option>
+                        <option value="安全建设方案">安全建设方案</option>
+                        <option value="运维管理记录">运维管理记录</option>
+                        <option value="测评整改材料">测评整改材料</option>
+                        <option value="其他安全文档">其他安全文档</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>处理页数上限</span>
+                      <select id="ocr-pages">
+                        <option value="40">40 页</option>
+                        <option value="100" selected>100 页</option>
+                        <option value="300">300 页</option>
+                        <option value="500">500 页</option>
+                      </select>
+                    </label>
+                  </div>
+
+                  <button id="analyze-btn" class="primary" type="button" disabled>开始分析</button>
+                </div>
+
+                <aside class="panel status-panel">
+                  <div class="section-head">
+                    <div>
+                      <p class="eyebrow">运行进度</p>
+                      <h3>审查流程</h3>
+                    </div>
+                  </div>
+                  <ol id="steps" class="steps">
+                    <li data-step="connect" class="active">连接运行时</li>
+                    <li data-step="extract">抽取文档文本</li>
+                    <li data-step="knowledge">匹配知识库</li>
+                    <li data-step="analyze">LLM 合规分析</li>
+                    <li data-step="save">保存审查记录</li>
+                    <li data-step="done">完成</li>
+                  </ol>
+                  <dl class="stats">
+                    <div><dt>文件</dt><dd id="stat-name">未选择</dd></div>
+                    <div><dt>文本</dt><dd id="stat-text">0 字</dd></div>
+                    <div><dt>知识</dt><dd id="stat-knowledge">0 条</dd></div>
+                    <div><dt>模型</dt><dd id="stat-model">等待</dd></div>
+                  </dl>
+                  <div id="progress-wrap" class="progress-wrap" hidden>
+                    <div class="progress-row">
+                      <span id="progress-text">等待</span>
+                      <span id="progress-percent">0%</span>
+                    </div>
+                    <div class="progress-track" aria-hidden="true"><div id="progress-bar" class="progress-bar"></div></div>
+                  </div>
+                </aside>
+              </div>
+
+              <section class="result-band">
+                <div class="tabs inner-tabs" role="tablist" aria-label="结果视图">
+                  <button id="tab-report-btn" class="tab active" type="button">审查结论</button>
+                  <button id="tab-text-btn" class="tab" type="button">抽取文本</button>
+                </div>
+                <pre id="report-output" class="output active">请选择公司、项目并上传文档。</pre>
+                <pre id="text-output" class="output">尚无抽取文本。</pre>
+              </section>
+            </div>
+          </section>
+
+          <section id="tab-records" class="tab-panel">
+            <div class="section-head page-section-head">
+              <div>
+                <p class="eyebrow">归档与追溯</p>
+                <h3>审查记录</h3>
+              </div>
+            </div>
+            <div id="record-list" class="table-shell"></div>
+          </section>
+
+          <section id="tab-knowledge" class="tab-panel">
+            <div class="section-head page-section-head">
+              <div>
+                <p class="eyebrow">公司级材料</p>
+                <h3>知识库</h3>
+              </div>
+              <button id="knowledge-open-upload-btn" class="primary compact-action" type="button">上传知识</button>
+            </div>
+            <div id="knowledge-list" class="table-shell"></div>
+          </section>
+
+          <section id="tab-companies" class="tab-panel">
+            <div class="section-head page-section-head">
+              <div>
+                <p class="eyebrow">企业档案</p>
+                <h3>公司管理</h3>
+              </div>
+              <button id="company-create-btn" class="primary compact-action" type="button">新建公司</button>
+            </div>
+            <div id="company-list" class="table-shell"></div>
+          </section>
+
+          <section id="tab-projects" class="tab-panel">
+            <div class="section-head page-section-head">
+              <div>
+                <p class="eyebrow">系统与等级</p>
+                <h3>项目管理</h3>
+              </div>
+              <button id="project-create-btn" class="primary compact-action" type="button">新建项目</button>
+            </div>
+            <div id="project-list" class="table-shell"></div>
+          </section>
+        </section>
+      </section>
+    </main>
+
+    <div id="modal-backdrop" class="modal-backdrop" hidden>
+      <section class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+        <header class="modal-header">
+          <h3 id="modal-title">详情</h3>
+          <button id="modal-close-btn" class="icon-button" type="button" aria-label="关闭">×</button>
+        </header>
+        <div id="modal-body" class="modal-body"></div>
+        <footer id="modal-footer" class="modal-footer"></footer>
+      </section>
+    </div>
+
+    <script src="anna-tool-ids.js" defer></script>
+    <script src="app.js" type="module"></script>
+  </body>
+</html>
