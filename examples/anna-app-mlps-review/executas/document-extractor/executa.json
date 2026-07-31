@@ -23,17 +23,17 @@
         ],
         "binary_urls": {
           "darwin-arm64": {
-            "url": "https://github.com/whtcjdtc2007/anna-executa-examples/releases/download/document-extractor-v0.1.0/tool-intern2-document-extractor-u2n2j8x5-darwin-arm64.tar.gz",
+            "url": "https://github.com/SamuelLiuCN/anna-executa-examples/releases/download/document-extractor-v0.1.0/tool-intern2-document-extractor-u2n2j8x5-darwin-arm64.tar.gz",
             "entrypoint": "tool-intern2-document-extractor-u2n2j8x5",
             "format": "tar.gz"
           },
           "darwin-x86_64": {
-            "url": "https://github.com/whtcjdtc2007/anna-executa-examples/releases/download/document-extractor-v0.1.0/tool-intern2-document-extractor-u2n2j8x5-darwin-x86_64.tar.gz",
+            "url": "https://github.com/SamuelLiuCN/anna-executa-examples/releases/download/document-extractor-v0.1.0/tool-intern2-document-extractor-u2n2j8x5-darwin-x86_64.tar.gz",
             "entrypoint": "tool-intern2-document-extractor-u2n2j8x5",
             "format": "tar.gz"
           },
           "linux-x86_64": {
-            "url": "https://github.com/whtcjdtc2007/anna-executa-examples/releases/download/document-extractor-v0.1.0/tool-intern2-document-extractor-u2n2j8x5-linux-x86_64.tar.gz",
+            "url": "https://github.com/SamuelLiuCN/anna-executa-examples/releases/download/document-extractor-v0.1.0/tool-intern2-document-extractor-u2n2j8x5-linux-x86_64.tar.gz",
             "entrypoint": "tool-intern2-document-extractor-u2n2j8x5",
             "format": "tar.gz"
           }
