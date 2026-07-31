@@ -7,5 +7,8 @@
     "dev:mock": "anna-app dev --mock-llm fixtures/happy-path.jsonl",
     "dev:off": "anna-app dev --no-llm",
     "validate": "anna-app validate --strict"
+  },
+  "devDependencies": {
+    "@anna-ai/cli": "^0.1.42"
   }
 }
