@@ -39,7 +39,7 @@ DOWNLOAD_CACHE_DIR = Path(tempfile.gettempdir()) / "anna-mlps-review-cache"
 MANIFEST: dict[str, Any] = {
     "name": "tool-intern2-document-extractor-u2n2j8x5",
     "display_name": "Document Extractor",
-    "version": "0.1.1",
+    "version": "0.1.2",
     "description": "Extract plain text from PDF, DOCX, TXT, and Markdown files for MLPS review.",
     "author": "Anna Developer",
     "license": "MIT",

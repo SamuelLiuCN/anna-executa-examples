@@ -3,11 +3,12 @@ import { AnnaAppRuntime } from "/static/anna-apps/_sdk/latest/index.js";
 const EXECUTA_HANDLE = "document-extractor";
 const DEV_FALLBACK_TOOL_ID = "tool-intern2-document-extractor-u2n2j8x5";
 const LEGACY_LOCAL_TOOL_ID = "tool-test-document-extractor-12345678";
+const BUNDLED_TOOL_ID = `bundled:${EXECUTA_HANDLE}`;
 const EXECUTA_TOOL_IDS = Array.from(new Set([
+  BUNDLED_TOOL_ID,
   typeof window !== "undefined" &&
     window.__ANNA_TOOL_IDS__ &&
     window.__ANNA_TOOL_IDS__[EXECUTA_HANDLE],
-  `bundled:${EXECUTA_HANDLE}`,
   DEV_FALLBACK_TOOL_ID,
   LEGACY_LOCAL_TOOL_ID,
 ].filter(Boolean)));
@@ -913,16 +914,19 @@ async function invokeExtractor(runtime, args) {
       return reply?.data || reply;
     } catch (err) {
       lastError = err;
-      if (!isToolWhitelistError(err)) throw err;
+      if (!isToolResolutionError(err)) throw err;
     }
   }
   throw lastError || new Error("Document extractor is not available");
 }
 
-function isToolWhitelistError(err) {
+function isToolResolutionError(err) {
   const message = errorMessage(err);
   const code = err?.code || err?.error?.code || "";
-  return code === "permission_denied" && /not whitelisted by host_api\.tools/i.test(message);
+  return (
+    (code === "permission_denied" && /not whitelisted by host_api\.tools/i.test(message)) ||
+    /executa_not_deployed|tool_not_found|not deployed|not found/i.test(`${code} ${message}`)
+  );
 }
 
 function emptyExtractionMessage(extraction) {
