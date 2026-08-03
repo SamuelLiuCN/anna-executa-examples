@@ -2,11 +2,15 @@ import { AnnaAppRuntime } from "/static/anna-apps/_sdk/latest/index.js";
 
 const EXECUTA_HANDLE = "document-extractor";
 const DEV_FALLBACK_TOOL_ID = "tool-intern2-document-extractor-u2n2j8x5";
-const EXECUTA_TOOL_ID =
-  (typeof window !== "undefined" &&
+const LEGACY_LOCAL_TOOL_ID = "tool-test-document-extractor-12345678";
+const EXECUTA_TOOL_IDS = Array.from(new Set([
+  typeof window !== "undefined" &&
     window.__ANNA_TOOL_IDS__ &&
-    window.__ANNA_TOOL_IDS__[EXECUTA_HANDLE]) ||
-  DEV_FALLBACK_TOOL_ID;
+    window.__ANNA_TOOL_IDS__[EXECUTA_HANDLE],
+  `bundled:${EXECUTA_HANDLE}`,
+  DEV_FALLBACK_TOOL_ID,
+  LEGACY_LOCAL_TOOL_ID,
+].filter(Boolean)));
 const EXECUTA_METHOD = "extract_document";
 
 const STORAGE_KEYS = {
@@ -894,16 +898,40 @@ async function deleteFileQuietly(runtime, path) {
 }
 
 async function invokeExtractor(runtime, args) {
-  const reply = await runtime.tools.invoke({
-    tool_id: EXECUTA_TOOL_ID,
-    method: EXECUTA_METHOD,
-    args,
-    timeoutMs: TOOL_HOST_TIMEOUT_MS,
-  }, { timeoutMs: TOOL_CLIENT_TIMEOUT_MS });
-  if (reply?.success === false) {
-    throw new Error(reply.error || "Executa returned success=false");
+  let lastError = null;
+  for (const toolId of EXECUTA_TOOL_IDS) {
+    try {
+      const reply = await runtime.tools.invoke({
+        tool_id: toolId,
+        method: EXECUTA_METHOD,
+        args,
+        timeoutMs: TOOL_HOST_TIMEOUT_MS,
+      }, { timeoutMs: TOOL_CLIENT_TIMEOUT_MS });
+      if (reply?.success === false) {
+        throw new Error(reply.error || "Executa returned success=false");
+      }
+      return reply?.data || reply;
+    } catch (err) {
+      lastError = err;
+      if (!isToolWhitelistError(err)) throw err;
+    }
   }
-  return reply?.data || reply;
+  throw lastError || new Error("Document extractor is not available");
+}
+
+function isToolWhitelistError(err) {
+  const message = errorMessage(err);
+  const code = err?.code || err?.error?.code || "";
+  return code === "permission_denied" && /not whitelisted by host_api\.tools/i.test(message);
+}
+
+function emptyExtractionMessage(extraction) {
+  const warnings = Array.isArray(extraction?.warnings) ? extraction.warnings.filter(Boolean) : [];
+  const warningText = warnings.length ? `\n\n抽取提示：\n- ${warnings.join("\n- ")}` : "";
+  const ocrHint = extraction?.ocr_used
+    ? "\n\n已尝试 OCR，但未识别到可分析文本。若在 staging 运行，请确认所选 Agent 已安装 Tesseract 及中文语言包 chi_sim。"
+    : "\n\n未检测到 PDF 文本层。若文档是扫描件或图片型 PDF，需要 OCR 能力。";
+  return `未抽取到可分析文本，请检查文档是否为扫描件或图片型 PDF。${ocrHint}${warningText}`;
 }
 
 async function sourceArgs(runtime, source) {
@@ -1315,7 +1343,7 @@ async function runAnalysis() {
     els.statText.textContent = `${text.length.toLocaleString("zh-CN")} 字`;
 
     if (!text.trim()) {
-      throw new Error("未抽取到可分析文本，请检查文档是否为扫描件或图片型 PDF。");
+      throw new Error(emptyExtractionMessage(extraction));
     }
 
     markStep("knowledge", "active");
