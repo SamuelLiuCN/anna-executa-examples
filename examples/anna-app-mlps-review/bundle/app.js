@@ -140,7 +140,7 @@ const annaReady = (async () => {
   } catch (err) {
     els.connection.textContent = "未连接";
     markStep("connect", "error");
-    els.report.textContent = formatError("runtime.connect", err);
+    setReportPlain(formatError("runtime.connect", err));
     throw err;
   }
 })();
@@ -230,6 +230,15 @@ function fileExt(name) {
   return (name.split(".").pop() || "").toLowerCase();
 }
 
+function basename(path) {
+  const name = String(path || "").split("/").filter(Boolean).pop() || "";
+  try {
+    return decodeURIComponent(name);
+  } catch {
+    return name;
+  }
+}
+
 function isSupported(file) {
   return ["pdf", "docx", "txt", "md", "markdown"].includes(fileExt(file.name));
 }
@@ -238,6 +247,170 @@ function formatError(label, err) {
   const code = err?.code || err?.error?.code || "error";
   const message = err?.message || err?.error?.message || String(err);
   return `[${label}] ${code}: ${message}`;
+}
+
+function setReportPlain(text) {
+  els.report.textContent = text || "";
+}
+
+function setReportMarkdown(markdown) {
+  els.report.innerHTML = renderMarkdown(markdown || "");
+}
+
+function renderMarkdown(markdown) {
+  const lines = String(markdown || "").replace(/\r\n?/g, "\n").split("\n");
+  const blocks = [];
+  let paragraph = [];
+  let codeLines = [];
+  let codeLang = "";
+  let inCode = false;
+
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    blocks.push(`<p>${renderInlineMarkdown(paragraph.join(" "))}</p>`);
+    paragraph = [];
+  };
+
+  const flushCode = () => {
+    blocks.push(
+      `<pre class="markdown-code"><code${codeLang ? ` data-lang="${escapeHtml(codeLang)}"` : ""}>${escapeHtml(codeLines.join("\n"))}</code></pre>`,
+    );
+    codeLines = [];
+    codeLang = "";
+  };
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const trimmed = line.trim();
+    const fence = trimmed.match(/^```([A-Za-z0-9_-]*)\s*$/);
+    if (fence) {
+      if (inCode) {
+        flushCode();
+        inCode = false;
+      } else {
+        flushParagraph();
+        inCode = true;
+        codeLang = fence[1] || "";
+      }
+      continue;
+    }
+    if (inCode) {
+      codeLines.push(line);
+      continue;
+    }
+    if (!trimmed) {
+      flushParagraph();
+      continue;
+    }
+
+    const heading = trimmed.match(/^(#{1,6})\s+(.+)$/);
+    if (heading) {
+      flushParagraph();
+      const level = Math.min(6, heading[1].length + 1);
+      blocks.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
+      continue;
+    }
+
+    if (/^[-*_]{3,}$/.test(trimmed)) {
+      flushParagraph();
+      blocks.push("<hr />");
+      continue;
+    }
+
+    if (isMarkdownTableStart(lines, index)) {
+      flushParagraph();
+      const tableLines = [];
+      while (index < lines.length && lines[index].includes("|") && lines[index].trim()) {
+        tableLines.push(lines[index]);
+        index += 1;
+      }
+      index -= 1;
+      blocks.push(renderMarkdownTable(tableLines));
+      continue;
+    }
+
+    const quote = trimmed.match(/^>\s?(.*)$/);
+    if (quote) {
+      flushParagraph();
+      const quoteLines = [quote[1]];
+      while (index + 1 < lines.length) {
+        const next = lines[index + 1].trim().match(/^>\s?(.*)$/);
+        if (!next) break;
+        quoteLines.push(next[1]);
+        index += 1;
+      }
+      blocks.push(`<blockquote>${quoteLines.map((part) => `<p>${renderInlineMarkdown(part)}</p>`).join("")}</blockquote>`);
+      continue;
+    }
+
+    const listMatch = trimmed.match(/^((?:[-*+])|\d+\.)\s+(.+)$/);
+    if (listMatch) {
+      flushParagraph();
+      const ordered = /^\d+\./.test(listMatch[1]);
+      const items = [listMatch[2]];
+      while (index + 1 < lines.length) {
+        const next = lines[index + 1].trim().match(/^((?:[-*+])|\d+\.)\s+(.+)$/);
+        if (!next || /^\d+\./.test(next[1]) !== ordered) break;
+        items.push(next[2]);
+        index += 1;
+      }
+      const tag = ordered ? "ol" : "ul";
+      blocks.push(`<${tag}>${items.map((item) => `<li>${renderInlineMarkdown(item)}</li>`).join("")}</${tag}>`);
+      continue;
+    }
+
+    paragraph.push(trimmed);
+  }
+
+  if (inCode) flushCode();
+  flushParagraph();
+  return blocks.length ? blocks.join("\n") : `<p>${escapeHtml(markdown || "")}</p>`;
+}
+
+function renderInlineMarkdown(value) {
+  let html = escapeHtml(value);
+  const codes = [];
+  html = html.replace(/`([^`]+)`/g, (_, code) => {
+    const token = `\u0000CODE${codes.length}\u0000`;
+    codes.push(`<code>${code}</code>`);
+    return token;
+  });
+  html = html
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/__([^_]+)__/g, "<strong>$1</strong>")
+    .replace(/\*([^*\s][^*]*?)\*/g, "<em>$1</em>")
+    .replace(/_([^_\s][^_]*?)_/g, "<em>$1</em>");
+  return html.replace(/\u0000CODE(\d+)\u0000/g, (_, index) => codes[Number(index)] || "");
+}
+
+function isMarkdownTableStart(lines, index) {
+  const current = lines[index]?.trim() || "";
+  const next = lines[index + 1]?.trim() || "";
+  return current.includes("|") && /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(next);
+}
+
+function splitMarkdownTableRow(line) {
+  return line
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
+}
+
+function renderMarkdownTable(tableLines) {
+  const header = splitMarkdownTableRow(tableLines[0] || "");
+  const rows = tableLines.slice(2).map(splitMarkdownTableRow);
+  return `
+    <div class="markdown-table-wrap">
+      <table>
+        <thead><tr>${header.map((cell) => `<th>${renderInlineMarkdown(cell)}</th>`).join("")}</tr></thead>
+        <tbody>
+          ${rows.map((row) => `<tr>${header.map((_, i) => `<td>${renderInlineMarkdown(row[i] || "")}</td>`).join("")}</tr>`).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
 }
 
 function setBusy(isBusy) {
@@ -479,6 +652,7 @@ function renderRecordList() {
           <td>${formatDate(record.createdAt)}</td>
           <td>${rowActions([
             ["view-record", record.id, "查看", "ghost"],
+            ["download-source", record.id, "下载源文件", "ghost"],
             ["download-record", record.id, "下载报告", "ghost"],
             ["delete-record", record.id, "删除", "danger"],
           ])}</td>
@@ -545,6 +719,7 @@ function renderModal() {
   els.modalBackdrop.hidden = false;
   const { type, payload } = modalState;
   const viewOutput = (text) => `<pre class="output modal-output active">${escapeHtml(text || "")}</pre>`;
+  const viewMarkdown = (text) => `<div class="output markdown-output modal-output active">${renderMarkdown(text || "")}</div>`;
 
   if (type === "record-view") {
     const record = payload.record;
@@ -553,17 +728,19 @@ function renderModal() {
       ? `<div class="empty">正在读取审查归档...</div>`
       : payload.error
         ? `<div class="empty">${escapeHtml(payload.error)}</div>`
-        : viewOutput([
-            `标题：${record.title}`,
-            `状态：${record.status}`,
-            `时间：${formatDate(record.createdAt)}`,
-            `知识库引用：${(record.knowledgeRefs || []).map((k) => k.title).join("；") || "未使用公司知识库"}`,
-            "",
-            payload.report || "",
-            payload.extracted ? `\n\n--- 抽取文本节选 ---\n${payload.extracted.slice(0, 12000)}` : "",
-          ].join("\n"));
+        : `
+          <dl class="meta-grid">
+            <div><dt>标题</dt><dd>${escapeHtml(record.title)}</dd></div>
+            <div><dt>状态</dt><dd>${escapeHtml(record.status)}</dd></div>
+            <div><dt>时间</dt><dd>${escapeHtml(formatDate(record.createdAt))}</dd></div>
+            <div><dt>知识库引用</dt><dd>${escapeHtml((record.knowledgeRefs || []).map((k) => k.title).join("；") || "未使用公司知识库")}</dd></div>
+          </dl>
+          ${viewMarkdown(payload.report || "暂无报告内容。")}
+          ${payload.extracted ? `<h4 class="modal-subtitle">抽取文本节选</h4>${viewOutput(payload.extracted.slice(0, 12000))}` : ""}
+        `;
     els.modalFooter.innerHTML = `
       <button class="ghost compact-action" type="button" data-modal-action="share-report" ${payload.report ? "" : "disabled"}>发送到对话继续整改</button>
+      <button class="ghost compact-action" type="button" data-modal-action="download-source" ${record?.sourceFilePath ? "" : "disabled"}>下载源文件</button>
       <button class="ghost compact-action" type="button" data-modal-action="download-record" ${record?.reportPath ? "" : "disabled"}>下载报告</button>
       <button class="ghost compact-action" type="button" data-modal-action="close-modal">关闭</button>
     `;
@@ -695,7 +872,7 @@ function selectFile(file) {
     els.statText.textContent = "0 字";
     els.statKnowledge.textContent = "0 条";
     els.statModel.textContent = "等待";
-    els.report.textContent = currentProject() ? "等待上传文档。" : "请先创建公司和项目。";
+    setReportPlain(currentProject() ? "等待上传文档。" : "请先创建公司和项目。");
     els.text.textContent = "尚无抽取文本。";
     updateActionState();
     return;
@@ -708,13 +885,13 @@ function selectFile(file) {
   els.statModel.textContent = "等待";
 
   if (!isSupported(selectedFile)) {
-    els.report.textContent = "仅支持 .pdf、.docx、.txt、.md 文件。";
+    setReportPlain("仅支持 .pdf、.docx、.txt、.md 文件。");
     selectedFile = null;
   } else if (selectedFile.size > MAX_FILE_BYTES) {
-    els.report.textContent = `文件过大：${formatBytes(selectedFile.size)}。当前限制为 ${formatBytes(MAX_FILE_BYTES)}。`;
+    setReportPlain(`文件过大：${formatBytes(selectedFile.size)}。当前限制为 ${formatBytes(MAX_FILE_BYTES)}。`);
     selectedFile = null;
   } else {
-    els.report.textContent = currentProject() ? "已选择文档。" : "请先创建公司和项目。";
+    setReportPlain(currentProject() ? "已选择文档。" : "请先创建公司和项目。");
     els.text.textContent = "等待抽取文本。";
   }
   updateActionState();
@@ -1004,7 +1181,7 @@ async function extractPdfInBatches(runtime, file, source, processPageLimit) {
       ? ((nextPage - 1) / Math.min(requestedPages, totalPages)) * 100
       : null;
     setProgress(`正在抽取第 ${nextPage}-${endLabel} 页`, beforePercent);
-    els.report.textContent = `正在抽取文档文本：第 ${nextPage}-${endLabel} 页。`;
+    setReportPlain(`正在抽取文档文本：第 ${nextPage}-${endLabel} 页。`);
 
     let result;
     try {
@@ -1181,7 +1358,7 @@ async function analyzeDocumentWithLlm(extraction, knowledgeRefs) {
   const partialReports = [];
   for (let index = 0; index < chunks.length; index += 1) {
     setProgress(`LLM 分段分析 ${index + 1} / ${chunks.length}`, null);
-    els.report.textContent = `正在请求 LLM 分析：第 ${index + 1} / ${chunks.length} 段。`;
+    setReportPlain(`正在请求 LLM 分析：第 ${index + 1} / ${chunks.length} 段。`);
     const reply = await analyzeWithLlm(
       extraction,
       knowledgeRefs,
@@ -1321,7 +1498,7 @@ async function runAnalysis() {
   setBusy(true);
   resetSteps();
   resetProgress();
-  els.report.textContent = "正在读取文档。";
+  setReportPlain("正在读取文档。");
   els.text.textContent = "";
   els.statModel.textContent = "等待";
 
@@ -1369,13 +1546,13 @@ async function runAnalysis() {
     ].filter(Boolean).join("\n");
 
     setProgress("正在请求 LLM 合规分析", null);
-    els.report.textContent = "正在请求 LLM 分析。";
+    setReportPlain("正在请求 LLM 分析。");
     markStep("analyze", "active");
     const reply = await analyzeDocumentWithLlm(extraction, knowledgeRefs);
     markStep("analyze", "done");
 
     latestReport = extractContent(reply);
-    els.report.textContent = latestReport;
+    setReportMarkdown(latestReport);
     els.statModel.textContent = reply?.model || "已完成";
 
     markStep("save", "active");
@@ -1390,6 +1567,9 @@ async function runAnalysis() {
       projectId: project.id,
       title: `${selectedFile.name} · ${formatDate(now)}`,
       sourceFilePath,
+      sourceFilename: selectedFile.name,
+      sourceMimeType: contentType,
+      sourceSizeBytes: selectedFile.size,
       extractedTextPath,
       reportPath,
       status: "已完成",
@@ -1416,7 +1596,7 @@ async function runAnalysis() {
   } catch (err) {
     const active = document.querySelector("#steps li.active");
     if (active) active.classList.add("error");
-    els.report.textContent = formatError("analysis", err);
+    setReportPlain(formatError("analysis", err));
   } finally {
     setBusy(false);
   }
@@ -1579,6 +1759,16 @@ async function downloadRecord(id = selectedRecordId) {
   });
 }
 
+async function downloadSourceFile(id = selectedRecordId) {
+  const runtime = await annaReady;
+  const record = appState.reviews.find((r) => r.id === id);
+  if (!record?.sourceFilePath) return;
+  await runtime.files.download({
+    path: record.sourceFilePath,
+    filename: sanitizeFilename(record.sourceFilename || basename(record.sourceFilePath) || record.title || "source-document"),
+  });
+}
+
 async function shareReportToChat(reportText) {
   const content = reportText || latestReport;
   if (!content) return;
@@ -1596,7 +1786,7 @@ async function shareReportToChat(reportText) {
       };
       renderModal();
     } else {
-      els.report.textContent = `${content}\n\n${formatError("chat.write_message", err)}`;
+      setReportPlain(`${content}\n\n${formatError("chat.write_message", err)}`);
     }
   }
 }
@@ -1881,6 +2071,7 @@ for (const table of [els.recordList, els.knowledgeList, els.companyList, els.pro
     const id = btn.dataset.id;
     const action = btn.dataset.action;
     if (action === "view-record") await viewRecord(id);
+    if (action === "download-source") await downloadSourceFile(id);
     if (action === "download-record") await downloadRecord(id);
     if (action === "delete-record") await deleteRecord(id);
     if (action === "view-knowledge") await viewKnowledge(id);
@@ -1912,6 +2103,7 @@ els.modalBackdrop.addEventListener("click", async (event) => {
   if (action === "delete-company") await deleteCompany();
   if (action === "save-project") await saveProjectForm();
   if (action === "delete-project") await deleteProject();
+  if (action === "download-source") await downloadSourceFile(selectedRecordId);
   if (action === "download-record") await downloadRecord(selectedRecordId);
   if (action === "share-report") {
     await shareReportToChat(modalState.payload?.report || latestReport);
