@@ -75,6 +75,11 @@
       "chat": [
         "write_message"
       ],
+      "agent": {
+        "session": {
+          "auto": true
+        }
+      },
       "window": [
         "set_title"
       ]

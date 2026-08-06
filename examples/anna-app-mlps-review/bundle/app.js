@@ -20,6 +20,7 @@ const STORAGE_KEYS = {
   projects: "mlps:v1:projects",
   reviews: "mlps:v1:reviews",
   knowledge: "mlps:v1:knowledge",
+  interprets: "mlps:v1:interprets",
 };
 
 const INLINE_CAP_BYTES = 8 * 1024 * 1024;
@@ -28,12 +29,24 @@ const TOOL_HOST_TIMEOUT_MS = 180000;
 const TOOL_CLIENT_TIMEOUT_MS = 190000;
 const OCR_DPI = 120;
 const PAGES_PER_TOOL_CALL = 20;
+const INTERPRET_PAGES_PER_TOOL_CALL = 5;
 const MIN_PAGES_PER_TOOL_CALL = 1;
 const MAX_PROCESS_PAGES = 500;
 const MAX_EXTRACT_CHARS = 500000;
 const MAX_LLM_CHARS = 90000;
 const MAX_KNOWLEDGE_ITEMS = 8;
 const MAX_KNOWLEDGE_CHARS = 40000;
+const MAX_INTERPRET_SYSTEM_PROMPT_CHARS = 3000;
+const MAX_INTERPRET_TURN_CONTEXT_CHARS = 8500;
+const MAX_INTERPRET_DIGEST_SOURCE_CHARS = 24000;
+const MAX_INTERPRET_DIGEST_CHARS = 1800;
+const MAX_INTERPRET_CONVERSATION_DIGEST_CHARS = 1500;
+const MAX_INTERPRET_EVIDENCE_ITEMS = 8;
+const MAX_INTERPRET_RECENT_MESSAGES = 6;
+const INTERPRET_EVIDENCE_CHUNK_CHARS = 2200;
+const INTERPRET_EVIDENCE_OVERLAP_CHARS = 200;
+const INTERPRET_EVIDENCE_MAX_CHUNKS = 260;
+const INTERPRET_CONVERSATION_DIGEST_TRIGGER = 10;
 const TEXT_UPLOAD_TYPE = "text/plain; charset=utf-8";
 
 const CONTROL_TERMS = [
@@ -75,6 +88,32 @@ const els = {
   reviewContent: $("review-content"),
   emptyCompany: $("empty-company-btn"),
   emptyProject: $("empty-project-btn"),
+  interpretEmpty: $("interpret-empty"),
+  interpretContent: $("interpret-content"),
+  interpretEmptyCompany: $("interpret-empty-company-btn"),
+  interpretEmptyProject: $("interpret-empty-project-btn"),
+  interpretFileInput: $("interpret-file-input"),
+  interpretDropZone: $("interpret-drop-zone"),
+  interpretFileMeta: $("interpret-file-meta"),
+  interpretProcessPages: $("interpret-pages"),
+  interpretUseKnowledge: $("interpret-use-knowledge"),
+  interpretAnalyze: $("interpret-analyze-btn"),
+  interpretReport: $("interpret-report-output"),
+  interpretStatName: $("interpret-stat-name"),
+  interpretStatText: $("interpret-stat-text"),
+  interpretStatKnowledge: $("interpret-stat-knowledge"),
+  interpretStatSession: $("interpret-stat-session"),
+  interpretProgressWrap: $("interpret-progress-wrap"),
+  interpretProgressText: $("interpret-progress-text"),
+  interpretProgressPercent: $("interpret-progress-percent"),
+  interpretProgressBar: $("interpret-progress-bar"),
+  interpretList: $("interpret-list"),
+  interpretChatList: $("interpret-chat-list"),
+  interpretChatInput: $("interpret-chat-input"),
+  interpretChatSend: $("interpret-chat-send-btn"),
+  interpretDownloadSource: $("interpret-download-source-btn"),
+  interpretDownloadReport: $("interpret-download-report-btn"),
+  interpretClearChat: $("interpret-clear-chat-btn"),
   fileInput: $("file-input"),
   dropZone: $("drop-zone"),
   fileMeta: $("file-meta"),
@@ -106,13 +145,19 @@ const els = {
 let anna = null;
 let selectedFile = null;
 let selectedKnowledgeFile = null;
+let selectedInterpretFile = null;
 let selectedKnowledgeId = null;
 let selectedRecordId = null;
+let selectedInterpretId = null;
 let latestReport = "";
 let latestExtraction = null;
 let latestKnowledgeRefs = [];
 let activeTab = "review";
 let modalState = { type: null, payload: null };
+let activeWorkstream = "review";
+let isSendingInterpretMessage = false;
+const interpretSessions = new Map();
+let interpretRunId = null;
 
 const appState = {
   index: { selectedCompanyId: null, selectedProjectId: null },
@@ -120,6 +165,7 @@ const appState = {
   projects: [],
   reviews: [],
   knowledge: [],
+  interprets: [],
 };
 
 const annaReady = (async () => {
@@ -128,6 +174,7 @@ const annaReady = (async () => {
     anna = runtime;
     els.connection.textContent = "已连接";
     markStep("connect", "done");
+    markStep("connect", "done", "interpret");
     await loadState();
     ensureValidSelection();
     renderAll();
@@ -171,8 +218,30 @@ function formatDate(value) {
   }
 }
 
-function markStep(name, state) {
-  for (const li of document.querySelectorAll("#steps li")) {
+function workstreamEls(kind = activeWorkstream) {
+  if (kind === "interpret") {
+    return {
+      steps: "#interpret-steps li",
+      progressWrap: els.interpretProgressWrap,
+      progressText: els.interpretProgressText,
+      progressPercent: els.interpretProgressPercent,
+      progressBar: els.interpretProgressBar,
+      report: els.interpretReport,
+    };
+  }
+  return {
+    steps: "#steps li",
+    progressWrap: els.progressWrap,
+    progressText: els.progressText,
+    progressPercent: els.progressPercent,
+    progressBar: els.progressBar,
+    report: els.report,
+  };
+}
+
+function markStep(name, state, kind = activeWorkstream) {
+  const target = workstreamEls(kind);
+  for (const li of document.querySelectorAll(target.steps)) {
     if (li.dataset.step === name) {
       li.classList.toggle("active", state === "active");
       li.classList.toggle("done", state === "done");
@@ -183,36 +252,39 @@ function markStep(name, state) {
   }
 }
 
-function resetSteps() {
-  for (const li of document.querySelectorAll("#steps li")) {
+function resetSteps(kind = activeWorkstream) {
+  const target = workstreamEls(kind);
+  for (const li of document.querySelectorAll(target.steps)) {
     li.classList.remove("active", "done", "error");
   }
-  markStep("connect", anna ? "done" : "active");
+  markStep("connect", anna ? "done" : "active", kind);
 }
 
 function setProgress(label, percent = null) {
-  if (!els.progressWrap) return;
-  els.progressWrap.hidden = false;
-  els.progressText.textContent = label;
+  const target = workstreamEls();
+  if (!target.progressWrap) return;
+  target.progressWrap.hidden = false;
+  target.progressText.textContent = label;
   if (Number.isFinite(percent)) {
     const bounded = Math.max(0, Math.min(100, percent));
-    els.progressWrap.classList.remove("indeterminate");
-    els.progressBar.style.width = `${bounded.toFixed(1)}%`;
-    els.progressPercent.textContent = `${Math.round(bounded)}%`;
+    target.progressWrap.classList.remove("indeterminate");
+    target.progressBar.style.width = `${bounded.toFixed(1)}%`;
+    target.progressPercent.textContent = `${Math.round(bounded)}%`;
   } else {
-    els.progressWrap.classList.add("indeterminate");
-    els.progressBar.style.width = "";
-    els.progressPercent.textContent = "处理中";
+    target.progressWrap.classList.add("indeterminate");
+    target.progressBar.style.width = "";
+    target.progressPercent.textContent = "处理中";
   }
 }
 
-function resetProgress() {
-  if (!els.progressWrap) return;
-  els.progressWrap.hidden = true;
-  els.progressWrap.classList.remove("indeterminate");
-  els.progressText.textContent = "等待";
-  els.progressPercent.textContent = "0%";
-  els.progressBar.style.width = "0";
+function resetProgress(kind = activeWorkstream) {
+  const target = workstreamEls(kind);
+  if (!target.progressWrap) return;
+  target.progressWrap.hidden = true;
+  target.progressWrap.classList.remove("indeterminate");
+  target.progressText.textContent = "等待";
+  target.progressPercent.textContent = "0%";
+  target.progressBar.style.width = "0";
 }
 
 function finishProgress(label) {
@@ -250,11 +322,13 @@ function formatError(label, err) {
 }
 
 function setReportPlain(text) {
-  els.report.textContent = text || "";
+  const target = workstreamEls();
+  if (target.report) target.report.textContent = text || "";
 }
 
 function setReportMarkdown(markdown) {
-  els.report.innerHTML = renderMarkdown(markdown || "");
+  const target = workstreamEls();
+  if (target.report) target.report.innerHTML = renderMarkdown(markdown || "");
 }
 
 function renderMarkdown(markdown) {
@@ -417,6 +491,13 @@ function setBusy(isBusy) {
   els.analyze.disabled = isBusy || !selectedFile || !currentProject();
   els.analyze.classList.toggle("busy", isBusy);
   els.analyze.textContent = isBusy ? "分析中" : "开始分析";
+  els.interpretAnalyze.disabled = isBusy || !selectedInterpretFile || !currentProject();
+  els.interpretAnalyze.classList.toggle("busy", isBusy);
+  els.interpretAnalyze.textContent = isBusy ? "解读中" : "开始解读";
+  els.interpretChatSend.disabled = isBusy || isSendingInterpretMessage || !currentInterpret() || !currentProject();
+  els.interpretChatSend.classList.toggle("busy", isSendingInterpretMessage);
+  els.interpretChatSend.textContent = isSendingInterpretMessage ? "发送中" : "发送";
+  els.interpretChatInput.disabled = isBusy || isSendingInterpretMessage || !currentInterpret() || !currentProject();
   const uploadBtn = $("knowledge-upload-btn");
   if (uploadBtn) uploadBtn.disabled = isBusy || !selectedKnowledgeFile || !currentCompany();
 }
@@ -441,9 +522,13 @@ async function readStorage(key, fallback) {
 }
 
 async function saveStateSlice(name) {
+  const value =
+    name === "interprets"
+      ? appState.interprets.map(({ analysis, evidenceIndexCache, ...record }) => record)
+      : appState[name];
   await anna.storage.set({
     key: STORAGE_KEYS[name],
-    value: JSON.stringify(appState[name]),
+    value: JSON.stringify(value),
   });
 }
 
@@ -487,14 +572,23 @@ function reviewsForCurrentProject() {
     .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
 }
 
+function interpretsForCurrentProject() {
+  return appState.interprets
+    .filter((r) => r.projectId === appState.index.selectedProjectId)
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+}
+
 function renderAll() {
   renderNavigation();
   renderContextSelectors();
   renderManagementLists();
   renderContext();
   renderReviewAvailability();
+  renderInterpretAvailability();
   renderKnowledgeList();
   renderRecordList();
+  renderInterpretList();
+  renderInterpretWorkspace();
   renderModal();
   updateActionState();
 }
@@ -562,17 +656,19 @@ function renderManagementLists() {
     els.projectList.innerHTML = `<div class="empty">当前公司暂无项目，点击右上角新建项目。</div>`;
   } else {
     els.projectList.innerHTML = tableHtml(
-      ["项目名称", "系统名称", "保护等级", "审查记录数", "更新时间", "操作"],
+      ["项目名称", "系统名称", "保护等级", "审查记录数", "解读记录数", "更新时间", "操作"],
       projects
         .map((project) => {
           const active = project.id === appState.index.selectedProjectId;
           const reviewCount = appState.reviews.filter((r) => r.projectId === project.id).length;
+          const interpretCount = appState.interprets.filter((r) => r.projectId === project.id).length;
           return `
             <tr class="${active ? "selected-row" : ""}">
               <td class="cell-strong">${escapeHtml(project.name)}</td>
               <td>${escapeHtml(project.systemName || "-")}</td>
               <td>${escapeHtml(project.level || "-")}</td>
               <td>${reviewCount}</td>
+              <td>${interpretCount}</td>
               <td>${formatDate(project.updatedAt || project.createdAt)}</td>
               <td>${rowActions([
                 ["select-project", project.id, active ? "已选择" : "选择", "ghost"],
@@ -597,6 +693,13 @@ function renderReviewAvailability() {
   els.reviewEmpty.hidden = ready;
   els.reviewContent.hidden = !ready;
   els.emptyProject.disabled = !currentCompany();
+}
+
+function renderInterpretAvailability() {
+  const ready = Boolean(currentCompany() && currentProject());
+  els.interpretEmpty.hidden = ready;
+  els.interpretContent.hidden = !ready;
+  els.interpretEmptyProject.disabled = !currentCompany();
 }
 
 function renderKnowledgeList() {
@@ -662,10 +765,106 @@ function renderRecordList() {
   );
 }
 
+function currentInterpret() {
+  return appState.interprets.find((r) => r.id === selectedInterpretId) || null;
+}
+
+function renderInterpretList() {
+  const records = interpretsForCurrentProject();
+  if (!currentProject()) {
+    els.interpretList.innerHTML = `<div class="empty">先选择项目后再查看解读记录。</div>`;
+    return;
+  }
+  if (!records.length) {
+    els.interpretList.innerHTML = `<div class="empty">暂无解读记录。上传第三方测评结果后会自动归档到这里。</div>`;
+    return;
+  }
+  els.interpretList.innerHTML = tableHtml(
+    ["标题", "状态", "页数进度", "知识引用", "对话轮次", "更新时间", "操作"],
+    records
+      .map((record) => `
+        <tr class="${record.id === selectedInterpretId ? "selected-row" : ""}">
+          <td class="cell-strong">${escapeHtml(record.title)}</td>
+          <td><span class="status-chip">${escapeHtml(record.status || "-")}</span></td>
+          <td>${record.processedPages || 0}/${record.pageCount || "-"}</td>
+          <td>${(record.knowledgeRefs || []).length} 条</td>
+          <td>${Math.floor((record.messages || []).length / 2)} 轮</td>
+          <td>${formatDate(record.updatedAt || record.createdAt)}</td>
+          <td>${rowActions([
+            ["open-interpret", record.id, "打开", "ghost"],
+            ["download-interpret-source", record.id, "下载源文件", "ghost"],
+            ["download-interpret-report", record.id, "下载报告", "ghost"],
+            ["delete-interpret", record.id, "删除", "danger"],
+          ])}</td>
+        </tr>
+      `)
+      .join(""),
+  );
+}
+
+function renderInterpretWorkspace() {
+  const record = currentInterpret();
+  els.interpretDownloadSource.disabled = !record?.sourceFilePath;
+  els.interpretDownloadReport.disabled = !record?.analysisPath;
+  els.interpretClearChat.disabled = !record || !(record.messages || []).length;
+  els.interpretChatSend.disabled = isSendingInterpretMessage || !record || !currentProject();
+  els.interpretChatSend.classList.toggle("busy", isSendingInterpretMessage);
+  els.interpretChatSend.textContent = isSendingInterpretMessage ? "发送中" : "发送";
+  els.interpretChatInput.disabled = isSendingInterpretMessage || !record || !currentProject();
+  if (!record) {
+    if (!selectedInterpretFile) {
+      els.interpretReport.textContent = currentProject()
+        ? "上传第三方测评结果文件后开始解读。"
+        : "请先创建公司和项目。";
+    }
+    renderInterpretMessages([]);
+    return;
+  }
+  if (record.analysis) {
+    els.interpretReport.innerHTML = renderMarkdown(record.analysis);
+  }
+  renderInterpretMessages(record.messages || []);
+  els.interpretStatName.textContent = record.sourceFilename || basename(record.sourceFilePath) || "-";
+  els.interpretStatText.textContent = record.charCount
+    ? `${Number(record.charCount).toLocaleString("zh-CN")} 字`
+    : "-";
+  els.interpretStatKnowledge.textContent = (record.knowledgeRefs || []).length
+    ? `${record.knowledgeRefs.length} 条`
+    : "未使用";
+  els.interpretStatSession.textContent = record.appSessionUuid ? "已创建" : "未创建";
+}
+
+function renderInterpretMessages(messages, pendingText = "") {
+  if (!messages.length && !pendingText) {
+    els.interpretChatList.innerHTML = `<div class="empty">完成一次解读后，可以继续追问整改优先级、证据材料和具体修改建议。</div>`;
+    return;
+  }
+  const rows = [...messages];
+  if (pendingText) {
+    rows.push({ role: "assistant", content: pendingText, pending: true });
+  }
+  els.interpretChatList.innerHTML = rows
+    .map((message) => `
+      <article class="chat-message ${message.role === "user" ? "user" : "assistant"} ${message.pending ? "pending" : ""}">
+        <header>${message.role === "user" ? "你" : message.pending ? "Anna 正在处理" : "Anna"}</header>
+        <div class="chat-bubble ${message.role === "assistant" ? "markdown-output" : ""} ${message.pending ? "pending-bubble" : ""}">
+          ${message.role === "assistant" ? renderMarkdown(message.content || "") : escapeHtml(message.content || "")}
+        </div>
+      </article>
+    `)
+    .join("");
+  els.interpretChatList.scrollTop = els.interpretChatList.scrollHeight;
+}
+
 function updateActionState() {
   els.analyze.disabled = !selectedFile || !currentCompany() || !currentProject();
+  els.interpretAnalyze.disabled = !selectedInterpretFile || !currentCompany() || !currentProject();
   els.knowledgeOpenUpload.disabled = !currentCompany();
   els.projectCreate.disabled = !currentCompany();
+  els.interpretChatSend.disabled = isSendingInterpretMessage || !currentInterpret() || !currentProject();
+  els.interpretChatSend.classList.toggle("busy", isSendingInterpretMessage);
+  els.interpretChatSend.textContent = isSendingInterpretMessage ? "发送中" : "发送";
+  els.interpretChatInput.disabled = isSendingInterpretMessage || !currentInterpret() || !currentProject();
   const uploadBtn = $("knowledge-upload-btn");
   if (uploadBtn) {
     uploadBtn.disabled = !selectedKnowledgeFile || !currentCompany();
@@ -920,6 +1119,53 @@ function selectKnowledgeFile(file) {
   updateActionState();
 }
 
+function selectInterpretFile(file) {
+  selectedInterpretFile = file || null;
+  selectedInterpretId = null;
+  resetProgress("interpret");
+  resetSteps("interpret");
+  renderInterpretMessages([]);
+  els.interpretStatSession.textContent = "等待";
+
+  if (!selectedInterpretFile) {
+    els.interpretFileMeta.textContent = "PDF / DOCX / TXT / MD，最大 200 MB";
+    els.interpretStatName.textContent = "未选择";
+    els.interpretStatText.textContent = "0 字";
+    els.interpretStatKnowledge.textContent = "0 条";
+    els.interpretReport.textContent = currentProject() ? "上传第三方测评结果文件后开始解读。" : "请先创建公司和项目。";
+    updateActionState();
+    return;
+  }
+
+  els.interpretStatName.textContent = selectedInterpretFile.name;
+  els.interpretFileMeta.textContent = `${selectedInterpretFile.name} · ${formatBytes(selectedInterpretFile.size)}`;
+  els.interpretStatText.textContent = "等待抽取";
+  els.interpretStatKnowledge.textContent = "等待";
+
+  if (!isSupported(selectedInterpretFile)) {
+    els.interpretReport.textContent = "仅支持 .pdf、.docx、.txt、.md 文件。";
+    selectedInterpretFile = null;
+    els.interpretDownloadSource.disabled = true;
+    els.interpretDownloadReport.disabled = true;
+    els.interpretClearChat.disabled = true;
+    updateActionState();
+    return;
+  } else if (selectedInterpretFile.size > MAX_FILE_BYTES) {
+    els.interpretReport.textContent = `文件过大：${formatBytes(selectedInterpretFile.size)}。当前限制为 ${formatBytes(MAX_FILE_BYTES)}。`;
+    selectedInterpretFile = null;
+    els.interpretDownloadSource.disabled = true;
+    els.interpretDownloadReport.disabled = true;
+    els.interpretClearChat.disabled = true;
+    updateActionState();
+    return;
+  } else {
+    els.interpretReport.textContent = currentProject() ? "已选择第三方测试结果文件。" : "请先创建公司和项目。";
+  }
+  renderInterpretList();
+  renderInterpretWorkspace();
+  updateActionState();
+}
+
 function readBlobAsBase64(blob) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -1151,6 +1397,7 @@ async function extractStoredDocument(runtime, file, source, processPageLimit = s
 
 async function extractPdfInBatches(runtime, file, source, processPageLimit) {
   const requestedPages = Math.min(Math.max(1, Number(processPageLimit) || 100), MAX_PROCESS_PAGES);
+  const initialBatchSize = activeWorkstream === "interpret" ? INTERPRET_PAGES_PER_TOOL_CALL : PAGES_PER_TOOL_CALL;
   const chunks = [];
   const warnings = [];
   const warningSet = new Set();
@@ -1163,7 +1410,7 @@ async function extractPdfInBatches(runtime, file, source, processPageLimit) {
   let ocrLang = "";
   let sizeBytes = file.size;
   let truncated = false;
-  let currentBatchSize = PAGES_PER_TOOL_CALL;
+  let currentBatchSize = initialBatchSize;
   const addWarning = (warning) => {
     if (!warningSet.has(warning)) {
       warningSet.add(warning);
@@ -1207,7 +1454,7 @@ async function extractPdfInBatches(runtime, file, source, processPageLimit) {
         addWarning(`第 ${nextPage} 页抽取失败，已跳过该页：${errorMessage(err)}`);
         processedPages = Math.max(processedPages, nextPage);
         nextPage += 1;
-        currentBatchSize = PAGES_PER_TOOL_CALL;
+        currentBatchSize = initialBatchSize;
         const cappedTotal = Math.min(requestedPages, totalPages || requestedPages);
         setProgress(
           `已处理 ${Math.min(processedPages, cappedTotal)} / ${cappedTotal} 页`,
@@ -1218,7 +1465,7 @@ async function extractPdfInBatches(runtime, file, source, processPageLimit) {
       }
       throw err;
     }
-    currentBatchSize = PAGES_PER_TOOL_CALL;
+    currentBatchSize = initialBatchSize;
 
     totalPages = Number(result.page_count || totalPages || 0) || totalPages;
     sizeBytes = Number(result.size_bytes || sizeBytes);
@@ -1417,7 +1664,7 @@ function tokenize(text) {
   return tokens;
 }
 
-async function matchKnowledge(runtime, extraction) {
+async function matchKnowledge(runtime, extraction, seedExtras = []) {
   const items = knowledgeForCurrentCompany();
   if (!items.length) return [];
   const project = currentProject();
@@ -1427,6 +1674,7 @@ async function matchKnowledge(runtime, extraction) {
     project?.systemName || "",
     project?.level || "",
     els.docKind.value,
+    ...seedExtras,
   ].join("\n");
   const query = tokenize(seed);
   const scored = items.map((item) => {
@@ -1488,6 +1736,474 @@ function relevantSnippet(text, query, budget) {
     }
   }
   return text.slice(best, best + budget);
+}
+
+function compactText(text, maxChars, note = "内容已截断") {
+  const value = String(text || "").trim();
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, maxChars)}\n\n[${note}：原始 ${value.length} 字符，仅保留前 ${maxChars} 字符]`;
+}
+
+function digestFallback(text, maxChars = MAX_INTERPRET_DIGEST_CHARS) {
+  const value = String(text || "").replace(/\s+/g, " ").trim();
+  if (!value) return "暂无可用摘要。";
+  const keywordLines = String(text || "")
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter((line) => /高风险|中风险|低风险|不符合|整改|身份鉴别|访问控制|安全审计|日志|证据不足/.test(line))
+    .slice(0, 12)
+    .join("\n");
+  return compactText([keywordLines, value].filter(Boolean).join("\n"), maxChars, "摘要已压缩");
+}
+
+async function summarizeInterpretText(kind, text, maxChars = MAX_INTERPRET_DIGEST_CHARS) {
+  const source = compactText(text, MAX_INTERPRET_DIGEST_SOURCE_CHARS, "摘要输入已截断");
+  if (!source) return "暂无可用摘要。";
+  try {
+    const runtime = await annaReady;
+    const reply = await runtime.llm.complete({
+      systemPrompt: "你是等保测评材料压缩助手。你只提取和保留对后续整改问答有用的信息，不新增事实，不声称正式测评结论。",
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: `请将以下${kind}压缩为不超过 ${maxChars} 个中文字符的结构化摘要。
+
+必须保留：
+1. 总体结论和风险态势。
+2. 高/中/低风险不符合项。
+3. 涉及控制域、证据线索和整改方向。
+4. 证据不足或需要补充确认的问题。
+
+${kind}：
+${source}`,
+          },
+        },
+      ],
+      maxTokens: 900,
+      temperature: 0.1,
+    });
+    return compactText(extractContent(reply) || digestFallback(text, maxChars), maxChars, "摘要已压缩");
+  } catch {
+    return digestFallback(text, maxChars);
+  }
+}
+
+function buildEvidenceIndex(analysis, extracted) {
+  const chunks = [];
+  const addChunks = (source, titlePrefix, text) => {
+    const value = String(text || "").trim();
+    if (!value) return;
+    const step = Math.max(500, INTERPRET_EVIDENCE_CHUNK_CHARS - INTERPRET_EVIDENCE_OVERLAP_CHARS);
+    for (let start = 0; start < value.length && chunks.length < INTERPRET_EVIDENCE_MAX_CHUNKS; start += step) {
+      const end = Math.min(value.length, start + INTERPRET_EVIDENCE_CHUNK_CHARS);
+      const body = value.slice(start, end).trim();
+      if (!body) continue;
+      const page = body.match(/第\s*(\d+)\s*页/)?.[1] || "";
+      const title = page ? `${titlePrefix} 第 ${page} 页附近` : `${titlePrefix} 片段 ${chunks.length + 1}`;
+      chunks.push({
+        id: `ev_${chunks.length + 1}`,
+        source,
+        title,
+        charStart: start,
+        charEnd: end,
+        keywords: Array.from(tokenize(body)).slice(0, 32),
+        text: body,
+      });
+      if (end >= value.length) break;
+    }
+  };
+  addChunks("analysis", "初始解读报告", analysis);
+  addChunks("extracted", "第三方测试结果", extracted);
+  return {
+    version: 1,
+    chunkChars: INTERPRET_EVIDENCE_CHUNK_CHARS,
+    overlapChars: INTERPRET_EVIDENCE_OVERLAP_CHARS,
+    createdAt: nowIso(),
+    items: chunks,
+  };
+}
+
+function scoreEvidenceItem(item, query) {
+  const haystack = [item.title, item.source, item.text, (item.keywords || []).join(" ")].join("\n").toLowerCase();
+  let score = 0;
+  for (const token of query) {
+    if (haystack.includes(token)) score += CONTROL_TERMS.includes(token) ? 6 : 1;
+  }
+  if (/高风险|严重|紧急/.test(haystack)) score += 2;
+  return score;
+}
+
+function selectEvidenceItems(evidenceIndex, queryText, limit = MAX_INTERPRET_EVIDENCE_ITEMS) {
+  const items = Array.isArray(evidenceIndex?.items) ? evidenceIndex.items : [];
+  if (!items.length) return [];
+  const query = tokenize(queryText);
+  const scored = items
+    .map((item) => ({ item, score: scoreEvidenceItem(item, query) }))
+    .sort((a, b) => b.score - a.score || a.item.id.localeCompare(b.item.id));
+  const matched = scored.filter((entry) => entry.score > 0).slice(0, limit).map((entry) => entry.item);
+  if (matched.length) return matched;
+  return items.filter((item) => item.source === "analysis").slice(0, 3).concat(items.filter((item) => item.source === "extracted").slice(0, 3)).slice(0, limit);
+}
+
+async function writeJsonFile(runtime, path, value) {
+  await writeTextFile(runtime, path, JSON.stringify(value, null, 2));
+  return path;
+}
+
+async function readJsonFile(runtime, path, fallback = null) {
+  try {
+    return JSON.parse(await readTextFile(runtime, path));
+  } catch {
+    return fallback;
+  }
+}
+
+function interpretBasePath(record) {
+  if (record?.analysisPath) return record.analysisPath.replace(/\/analysis\.md$/, "");
+  return `mlps-review/companies/${record.companyId}/projects/${record.projectId}/interprets/${record.id}`;
+}
+
+async function ensureInterpretCompression(record) {
+  const runtime = await annaReady;
+  const context = await contextForInterpretRecord(record);
+  let changed = false;
+
+  if (!record.analysisDigest) {
+    record.analysisDigest = await summarizeInterpretText("初始解读报告", context.analysis, MAX_INTERPRET_DIGEST_CHARS);
+    changed = true;
+  }
+  if (!record.extractionDigest) {
+    record.extractionDigest = await summarizeInterpretText("第三方测试结果抽取文本", context.extracted, MAX_INTERPRET_DIGEST_CHARS);
+    changed = true;
+  }
+  if (!record.evidenceIndexPath) {
+    const evidenceIndex = buildEvidenceIndex(context.analysis, context.extracted);
+    const evidenceIndexPath = `${interpretBasePath(record)}/evidence-index.json`;
+    await writeJsonFile(runtime, evidenceIndexPath, evidenceIndex);
+    record.evidenceIndexPath = evidenceIndexPath;
+    record.evidenceIndex = {
+      path: evidenceIndexPath,
+      itemCount: evidenceIndex.items.length,
+      version: evidenceIndex.version,
+      updatedAt: evidenceIndex.createdAt,
+    };
+    record.evidenceIndexCache = evidenceIndex;
+    changed = true;
+  }
+  if (changed) {
+    record.updatedAt = nowIso();
+    await saveStateSlice("interprets");
+  }
+  return record;
+}
+
+async function readInterpretEvidenceIndex(record) {
+  const runtime = await annaReady;
+  if (record.evidenceIndexCache) return record.evidenceIndexCache;
+  const path = record.evidenceIndexPath || record.evidenceIndex?.path;
+  if (path) {
+    const index = await readJsonFile(runtime, path, null);
+    if (index?.items) {
+      record.evidenceIndexCache = index;
+      return index;
+    }
+  }
+  await ensureInterpretCompression(record);
+  return record.evidenceIndexCache || { items: [] };
+}
+
+async function matchKnowledgeForInterpretTurn(runtime, record, queryText) {
+  const items = appState.knowledge.filter((k) => k.companyId === record.companyId);
+  if (!items.length) return [];
+  const query = tokenize(queryText);
+  const scored = items
+    .map((item) => {
+      const haystack = [item.title, item.summary, (item.tags || []).join(" "), item.docKind].join("\n").toLowerCase();
+      let score = 0;
+      for (const token of query) {
+        if (haystack.includes(token)) score += CONTROL_TERMS.includes(token) ? 5 : 1;
+      }
+      return { item, score };
+    })
+    .sort((a, b) => b.score - a.score || String(b.item.updatedAt).localeCompare(String(a.item.updatedAt)));
+
+  const refs = [];
+  let usedChars = 0;
+  for (const { item, score } of scored.slice(0, MAX_KNOWLEDGE_ITEMS)) {
+    if (score <= 0 && refs.length >= 2) continue;
+    let text = "";
+    try {
+      text = await readTextFile(runtime, item.textPath);
+    } catch {
+      continue;
+    }
+    const budget = Math.min(1200, 6000 - usedChars);
+    if (budget <= 0) break;
+    const snippet = relevantSnippet(text, query, budget);
+    usedChars += snippet.length;
+    refs.push({ id: item.id, title: item.title, tags: item.tags || [], score, snippet });
+  }
+  return refs;
+}
+
+function buildEvidenceContext(items) {
+  if (!items.length) return "未检索到直接相关证据片段。";
+  return items
+    .map((item, index) => `【证据 ${index + 1}｜${item.source === "analysis" ? "初始解读" : "测试结果"}】${item.title}\n${compactText(item.text, 900, "证据片段已截断")}`)
+    .join("\n\n");
+}
+
+function buildKnowledgeTurnContext(refs) {
+  if (!refs.length) return "未使用公司知识库。";
+  return refs
+    .map((ref, index) => `【知识 ${index + 1}】${ref.title}\n标签：${(ref.tags || []).join(", ") || "-"}\n${compactText(ref.snippet, 900, "知识片段已截断")}`)
+    .join("\n\n");
+}
+
+function buildRecentConversationContext(messages) {
+  const recent = (messages || []).slice(-MAX_INTERPRET_RECENT_MESSAGES);
+  if (!recent.length) return "暂无最近对话。";
+  return recent
+    .map((message) => `${message.role === "user" ? "用户" : "助手"}：${compactText(message.content || "", 800, "消息已截断")}`)
+    .join("\n\n");
+}
+
+async function buildInterpretTurnContext(record, question) {
+  const runtime = await annaReady;
+  await ensureInterpretCompression(record);
+  const evidenceIndex = await readInterpretEvidenceIndex(record);
+  const querySeed = [
+    question,
+    record.analysisDigest || "",
+    record.extractionDigest || "",
+    record.conversationDigest || "",
+    (record.knowledgeRefs || []).map((k) => k.title).join(" "),
+  ].join("\n");
+  const evidenceItems = selectEvidenceItems(evidenceIndex, querySeed, MAX_INTERPRET_EVIDENCE_ITEMS);
+  const knowledgeRefs = await matchKnowledgeForInterpretTurn(runtime, record, querySeed);
+  const content = `请基于下面的精简上下文回答用户本轮追问。
+
+回答要求：
+- 明确区分“测试结果文件依据”“公司知识库补充依据”“推断/建议”。
+- 证据不足时直接说明证据不足，并说明需要补充哪些材料。
+- 不要声称这是正式认证或最终测评结论。
+- 输出中文 Markdown，优先给出可执行整改建议。
+
+用户本轮问题：
+${question}
+
+初始解读摘要：
+${record.analysisDigest || "暂无"}
+
+测试结果摘要：
+${record.extractionDigest || "暂无"}
+
+历史对话摘要：
+${record.conversationDigest || "暂无"}
+
+相关证据片段：
+${buildEvidenceContext(evidenceItems)}
+
+公司知识库补充材料：
+${buildKnowledgeTurnContext(knowledgeRefs)}
+
+最近对话：
+${buildRecentConversationContext(record.messages || [])}`;
+  return compactText(content, MAX_INTERPRET_TURN_CONTEXT_CHARS, "本轮上下文已按预算压缩");
+}
+
+async function refreshInterpretConversationDigest(record) {
+  const messages = record.messages || [];
+  if (messages.length <= INTERPRET_CONVERSATION_DIGEST_TRIGGER) return;
+  const older = messages.slice(0, -MAX_INTERPRET_RECENT_MESSAGES);
+  if (!older.length) return;
+  const recent = messages.slice(-MAX_INTERPRET_RECENT_MESSAGES);
+  const transcript = older
+    .map((message) => `${message.role === "user" ? "用户" : "助手"}：${message.content}`)
+    .join("\n\n");
+  try {
+    const runtime = await annaReady;
+    const reply = await runtime.llm.complete({
+      systemPrompt: "你是对话摘要助手。请保留用户目标、已确认结论、整改建议、待办问题和证据依据，不新增事实。",
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: `请把下面历史对话与既有摘要合并为不超过 ${MAX_INTERPRET_CONVERSATION_DIGEST_CHARS} 字的滚动摘要。
+
+既有摘要：
+${record.conversationDigest || "暂无"}
+
+待压缩历史对话：
+${compactText(transcript, 18000, "历史对话已截断")}`,
+          },
+        },
+      ],
+      maxTokens: 800,
+      temperature: 0.1,
+    });
+    record.conversationDigest = compactText(extractContent(reply), MAX_INTERPRET_CONVERSATION_DIGEST_CHARS, "对话摘要已压缩");
+    record.messages = recent;
+  } catch {
+    record.conversationDigest = compactText(
+      [record.conversationDigest, digestFallback(transcript, MAX_INTERPRET_CONVERSATION_DIGEST_CHARS)].filter(Boolean).join("\n"),
+      MAX_INTERPRET_CONVERSATION_DIGEST_CHARS,
+      "对话摘要已压缩",
+    );
+    record.messages = recent;
+  }
+}
+
+function buildInterpretPrompt(extraction, knowledgeRefs) {
+  const text = extraction.text || "";
+  const project = currentProject();
+  const truncated =
+    text.length > MAX_LLM_CHARS
+      ? `${text.slice(0, MAX_LLM_CHARS)}\n\n[文本已截断：原始 ${text.length} 字符，仅分析前 ${MAX_LLM_CHARS} 字符]`
+      : text;
+  return `请解读以下第三方网络安全等级保护测评/测试结果文件。
+
+公司：${currentCompany()?.name || "-"}
+项目：${project?.name || "-"}
+系统名称：${project?.systemName || "-"}
+保护等级：${project?.level || els.level.value}
+文件名：${selectedInterpretFile?.name || extraction.filename || "-"}
+
+请使用中文输出 Markdown，结构必须包含：
+1. 测评结果概览：说明整体状态、主要结论和需要管理层关注的事项。
+2. 不符合项清单：按风险高/中/低归类，列出问题、影响、涉及控制域、证据来源。
+3. 整改建议：每个不符合项给出可执行整改动作、责任方向、优先级和建议佐证材料。
+4. 证据与疑点：明确哪些来自第三方测试结果文件，哪些来自公司知识库补充材料，哪些是基于专业经验的推断。
+5. 后续追问建议：列出 3-5 个值得继续追问的问题。
+
+限制：不要声称这是正式认证或最终测评结论；若文件中证据不足，必须标注“证据不足”。
+
+公司知识库补充材料：
+${buildKnowledgeContext(knowledgeRefs)}
+
+第三方测试结果文件正文：
+${truncated}`;
+}
+
+function buildCompactInterpretSystemPrompt(record = null) {
+  const project = currentProject();
+  const knowledgeTitles = (record?.knowledgeRefs || []).map((k) => k.title).join("；") || "未使用公司知识库";
+  return compactText(`你是等保测评结果解读与整改顾问。你正在围绕一份第三方等保测评/测试结果文件进行多轮答疑。
+
+基本信息：
+公司：${currentCompany()?.name || "-"}
+项目：${project?.name || "-"}
+系统名称：${project?.systemName || "-"}
+保护等级：${project?.level || els.level.value}
+文件名：${record?.sourceFilename || "-"}
+使用知识库：${knowledgeTitles}
+
+回答要求：
+- 只能基于每轮用户消息中提供的测试结果摘要、初始解读摘要、证据片段、公司知识库补充材料和用户后续补充回答。
+- 必须区分“测试结果文件依据”“公司知识库补充依据”“推断/建议”。
+- 对证据不足的地方直接说明证据不足，并给出需要补充的材料。
+- 不要声称这是正式认证或最终测评结论。
+- 输出中文 Markdown，尽量给出可落地整改建议。`, MAX_INTERPRET_SYSTEM_PROMPT_CHARS, "系统提示已压缩");
+}
+
+async function analyzeInterpretationWithLlm(extraction, knowledgeRefs) {
+  const runtime = await annaReady;
+  return runtime.llm.complete({
+    systemPrompt: "你是资深网络安全等级保护（等保 2.0）测评结果解读顾问。你擅长从第三方测评报告、测试结果和整改清单中识别不符合项、风险等级、整改路径和证据缺口。你必须区分文件依据、公司知识库补充材料和推断建议。",
+    messages: [
+      { role: "user", content: { type: "text", text: buildInterpretPrompt(extraction, knowledgeRefs) } },
+    ],
+    maxTokens: 3200,
+    temperature: 0.2,
+  });
+}
+
+function extractAgentFrameText(frame) {
+  if (!frame) return "";
+  if (frame.event === "sse") return frame.choices?.[0]?.delta?.content || "";
+  if (frame.event === "model_token" || frame.event === "delta") return frame.text || "";
+  if (frame.event === "final") return frame.text || extractContent(frame);
+  return "";
+}
+
+function isSessionExpiredError(err) {
+  const name = err?.name || err?.error?.name || "";
+  const message = errorMessage(err);
+  return /APP_SESSION_EXPIRED|APP_SESSION_REVOKED|APP_SESSION_TOKEN_EXPIRED/i.test(`${name} ${message}`);
+}
+
+async function createInterpretSession(record) {
+  const runtime = await annaReady;
+  if (!runtime.agent?.session) {
+    throw new Error("当前 Anna 运行时未提供 agent.session，请确认 manifest 权限和宿主版本。");
+  }
+  const session = await runtime.agent.session({
+    submode: "auto",
+    systemPrompt: buildCompactInterpretSystemPrompt(record),
+  });
+  const uuid = session.app_session_uuid || session.appSessionUuid || "";
+  interpretSessions.set(record.id, session);
+  record.appSessionUuid = uuid;
+  record.updatedAt = nowIso();
+  await saveStateSlice("interprets");
+  els.interpretStatSession.textContent = uuid ? "已创建" : "已创建（无 uuid）";
+  return session;
+}
+
+async function ensureInterpretSession(record) {
+  if (!record) throw new Error("请先打开或创建一条解读记录。");
+  const cached = interpretSessions.get(record.id);
+  if (cached) return cached;
+  if (record.appSessionUuid && anna?.agent?.session?.attach) {
+    try {
+      const attached = anna.agent.session.attach(record.appSessionUuid);
+      interpretSessions.set(record.id, attached);
+      return attached;
+    } catch {
+      // A stale local handle can be recreated with persisted context below.
+    }
+  }
+  return createInterpretSession(record);
+}
+
+async function contextForInterpretRecord(record) {
+  const runtime = await annaReady;
+  const [analysis, extracted] = await Promise.all([
+    record.analysisPath ? readTextFile(runtime, record.analysisPath).catch(() => record.analysis || "") : Promise.resolve(record.analysis || ""),
+    record.extractedTextPath ? readTextFile(runtime, record.extractedTextPath).catch(() => "") : Promise.resolve(""),
+  ]);
+  record.analysis = analysis;
+  return { analysis, extracted };
+}
+
+async function runInterpretChatTurn(record, content, retry = true) {
+  const turnContent = await buildInterpretTurnContext(record, content);
+  let session = await ensureInterpretSession(record);
+  let answer = "";
+  try {
+    const stream = session.run({ content: turnContent });
+    for await (const frame of stream) {
+      if (frame.run_id) interpretRunId = frame.run_id;
+      if (frame.event === "error") throw new Error(frame.message || "agent session error");
+      const delta = extractAgentFrameText(frame);
+      if (delta) {
+        answer += delta;
+        renderInterpretMessages([...(record.messages || []), { role: "assistant", content: answer }]);
+      }
+    }
+    if (stream.runId) interpretRunId = stream.runId;
+    return answer.trim() || "已完成，但本轮没有返回可展示文本。";
+  } catch (err) {
+    if (retry && isSessionExpiredError(err)) {
+      interpretSessions.delete(record.id);
+      session = await createInterpretSession(record);
+      return runInterpretChatTurn(record, content, false);
+    }
+    throw err;
+  }
 }
 
 async function runAnalysis() {
@@ -1598,6 +2314,148 @@ async function runAnalysis() {
     if (active) active.classList.add("error");
     setReportPlain(formatError("analysis", err));
   } finally {
+    setBusy(false);
+  }
+}
+
+async function runInterpretation() {
+  const runtime = await annaReady;
+  const project = currentProject();
+  const company = currentCompany();
+  const file = selectedInterpretFile;
+  if (!file || !project || !company) return;
+  activeWorkstream = "interpret";
+  setBusy(true);
+  resetSteps("interpret");
+  resetProgress("interpret");
+  els.interpretReport.textContent = "正在读取第三方测试结果文件。";
+  renderInterpretMessages([]);
+  els.interpretStatSession.textContent = "等待";
+
+  const recordId = newId("interpret");
+  const safeName = sanitizeFilename(file.name);
+  const basePath = `mlps-review/companies/${company.id}/projects/${project.id}/interprets/${recordId}`;
+  const contentType = file.type || guessMime(file.name);
+
+  try {
+    markStep("extract", "active", "interpret");
+    setProgress("正在上传第三方测试结果源文件", null);
+    const sourceFilePath = await uploadFileToPath(runtime, file, `${basePath}/source/${safeName}`, contentType);
+    const source =
+      file.size <= INLINE_CAP_BYTES
+        ? await inlineSource(file, contentType)
+        : storedSource(contentType, sourceFilePath);
+    const extraction = await extractStoredDocument(runtime, file, source, selectedInterpretPages());
+    markStep("extract", "done", "interpret");
+
+    const text = extraction.text || "";
+    const warnings = Array.isArray(extraction.warnings) ? [...extraction.warnings] : [];
+    els.interpretStatText.textContent = `${text.length.toLocaleString("zh-CN")} 字`;
+    if (!text.trim()) {
+      throw new Error(emptyExtractionMessage(extraction));
+    }
+
+    markStep("knowledge", "active", "interpret");
+    setProgress("正在匹配公司知识库", null);
+    const knowledgeRefs = els.interpretUseKnowledge.checked
+      ? await matchKnowledge(runtime, extraction, ["第三方测评结果", "测试结果", "不符合项", "整改建议", "风险等级"])
+      : [];
+    els.interpretStatKnowledge.textContent = knowledgeRefs.length ? `${knowledgeRefs.length} 条` : "未使用";
+    markStep("knowledge", "done", "interpret");
+
+    setProgress("正在请求 LLM 解读测试结果", null);
+    els.interpretReport.textContent = "正在生成第三方测试结果解读报告。";
+    markStep("analyze", "active", "interpret");
+    const reply = await analyzeInterpretationWithLlm(extraction, knowledgeRefs);
+    const analysis = extractContent(reply);
+    els.interpretReport.innerHTML = renderMarkdown(analysis);
+    markStep("analyze", "done", "interpret");
+
+    markStep("save", "active", "interpret");
+    const extractedTextPath = `${basePath}/extracted.txt`;
+    const analysisPath = `${basePath}/analysis.md`;
+    const evidenceIndexPath = `${basePath}/evidence-index.json`;
+    await writeTextFile(runtime, extractedTextPath, text);
+    await writeTextFile(runtime, analysisPath, analysis);
+    setProgress("正在压缩解读上下文", null);
+    const [analysisDigest, extractionDigest] = await Promise.all([
+      summarizeInterpretText("初始解读报告", analysis, MAX_INTERPRET_DIGEST_CHARS),
+      summarizeInterpretText("第三方测试结果抽取文本", text, MAX_INTERPRET_DIGEST_CHARS),
+    ]);
+    const evidenceIndex = buildEvidenceIndex(analysis, text);
+    await writeJsonFile(runtime, evidenceIndexPath, evidenceIndex);
+    const now = nowIso();
+    const record = {
+      id: recordId,
+      companyId: company.id,
+      projectId: project.id,
+      title: `${file.name} · ${formatDate(now)}`,
+      sourceFilePath,
+      sourceFilename: file.name,
+      sourceMimeType: contentType,
+      sourceSizeBytes: file.size,
+      extractedTextPath,
+      analysisPath,
+      analysis,
+      analysisDigest,
+      extractionDigest,
+      conversationDigest: "",
+      evidenceIndexPath,
+      evidenceIndex: {
+        path: evidenceIndexPath,
+        itemCount: evidenceIndex.items.length,
+        version: evidenceIndex.version,
+        updatedAt: evidenceIndex.createdAt,
+      },
+      evidenceIndexCache: evidenceIndex,
+      status: "已完成",
+      processedPages: extraction.processed_page_count || extraction.page_count || null,
+      pageCount: extraction.page_count || null,
+      charCount: text.length,
+      knowledgeRefs: knowledgeRefs.map((k) => ({ id: k.id, title: k.title, score: k.score })),
+      appSessionUuid: "",
+      messages: [],
+      summary: summarizeText(analysis),
+      params: {
+        maxPages: selectedInterpretPages(),
+        ocrDpi: OCR_DPI,
+        useKnowledge: els.interpretUseKnowledge.checked,
+      },
+      createdAt: now,
+      updatedAt: now,
+    };
+    appState.interprets.unshift(record);
+    selectedInterpretId = recordId;
+    await saveStateSlice("interprets");
+    try {
+      await createInterpretSession(record);
+    } catch (sessionErr) {
+      record.messages = [
+        {
+          role: "assistant",
+          content: `初始解读已完成并归档，但多轮会话暂未创建：${formatError("agent.session", sessionErr)}。稍后继续追问时会自动重试创建会话。`,
+          createdAt: nowIso(),
+        },
+      ];
+      record.updatedAt = nowIso();
+      els.interpretStatSession.textContent = "待重试";
+      await saveStateSlice("interprets");
+    }
+    markStep("save", "done", "interpret");
+    markStep("done", "done", "interpret");
+    finishProgress("解读完成并已归档");
+
+    selectedInterpretFile = null;
+    els.interpretFileInput.value = "";
+    els.interpretFileMeta.textContent = "PDF / DOCX / TXT / MD，最大 200 MB";
+    renderInterpretList();
+    renderInterpretWorkspace();
+  } catch (err) {
+    const active = document.querySelector("#interpret-steps li.active");
+    if (active) active.classList.add("error");
+    els.interpretReport.textContent = formatError("interpret", err);
+  } finally {
+    activeWorkstream = "review";
     setBusy(false);
   }
 }
@@ -1769,6 +2627,123 @@ async function downloadSourceFile(id = selectedRecordId) {
   });
 }
 
+async function openInterpretRecord(id) {
+  const runtime = await annaReady;
+  selectedInterpretId = id;
+  selectedInterpretFile = null;
+  const record = appState.interprets.find((r) => r.id === id);
+  renderInterpretList();
+  if (!record) return;
+  els.interpretReport.textContent = "正在读取解读归档。";
+  try {
+    const analysis = await readTextFile(runtime, record.analysisPath);
+    record.analysis = analysis;
+    els.interpretReport.innerHTML = renderMarkdown(analysis || "暂无解读报告。");
+  } catch (err) {
+    els.interpretReport.textContent = formatError("interpret.read", err);
+  }
+  renderInterpretWorkspace();
+  showMainTab("interpret");
+}
+
+async function deleteInterpretRecord(id = selectedInterpretId) {
+  const runtime = await annaReady;
+  const record = appState.interprets.find((r) => r.id === id);
+  if (!record || !confirm(`删除解读记录「${record.title}」？`)) return;
+  await deleteInterpretSessionQuietly(record);
+  appState.interprets = appState.interprets.filter((r) => r.id !== record.id);
+  if (selectedInterpretId === record.id) selectedInterpretId = null;
+  await saveStateSlice("interprets");
+  await Promise.all([
+    deleteFileQuietly(runtime, record.sourceFilePath),
+    deleteFileQuietly(runtime, record.extractedTextPath),
+    deleteFileQuietly(runtime, record.analysisPath),
+    deleteFileQuietly(runtime, record.evidenceIndexPath || record.evidenceIndex?.path),
+  ]);
+  renderInterpretList();
+  renderInterpretWorkspace();
+}
+
+async function downloadInterpretReport(id = selectedInterpretId) {
+  const runtime = await annaReady;
+  const record = appState.interprets.find((r) => r.id === id);
+  if (!record?.analysisPath) return;
+  await runtime.files.download({
+    path: record.analysisPath,
+    filename: `${sanitizeFilename(record.title)}.md`,
+  });
+}
+
+async function downloadInterpretSourceFile(id = selectedInterpretId) {
+  const runtime = await annaReady;
+  const record = appState.interprets.find((r) => r.id === id);
+  if (!record?.sourceFilePath) return;
+  await runtime.files.download({
+    path: record.sourceFilePath,
+    filename: sanitizeFilename(record.sourceFilename || basename(record.sourceFilePath) || record.title || "interpret-source"),
+  });
+}
+
+async function deleteInterpretSessionQuietly(record) {
+  try {
+    const session =
+      interpretSessions.get(record.id) ||
+      (record.appSessionUuid && anna?.agent?.session?.attach
+        ? anna.agent.session.attach(record.appSessionUuid)
+        : null);
+    if (session?.delete) await session.delete();
+  } catch {
+    // Session cleanup is best-effort; persisted records remain usable.
+  }
+  interpretSessions.delete(record.id);
+}
+
+async function sendInterpretMessage() {
+  const record = currentInterpret();
+  const content = (els.interpretChatInput.value || "").trim();
+  if (!record || !content || isSendingInterpretMessage) return;
+  els.interpretChatInput.value = "";
+  isSendingInterpretMessage = true;
+  els.interpretChatSend.disabled = true;
+  els.interpretChatSend.classList.add("busy");
+  els.interpretChatSend.textContent = "发送中";
+  els.interpretChatInput.disabled = true;
+  record.messages = [...(record.messages || []), { role: "user", content, createdAt: nowIso() }];
+  renderInterpretMessages(record.messages, "正在整理上下文并生成回答...");
+  try {
+    const answer = await runInterpretChatTurn(record, content);
+    record.messages.push({ role: "assistant", content: answer, createdAt: nowIso() });
+    await refreshInterpretConversationDigest(record);
+    record.updatedAt = nowIso();
+    await saveStateSlice("interprets");
+    renderInterpretMessages(record.messages);
+    renderInterpretList();
+    renderInterpretWorkspace();
+  } catch (err) {
+    const errorText = formatError("interpret.chat", err);
+    record.messages.push({ role: "assistant", content: errorText, createdAt: nowIso() });
+    record.updatedAt = nowIso();
+    await saveStateSlice("interprets");
+    renderInterpretMessages(record.messages);
+  } finally {
+    isSendingInterpretMessage = false;
+    updateActionState();
+  }
+}
+
+async function clearInterpretChat() {
+  const record = currentInterpret();
+  if (!record || !confirm(`清空「${record.title}」的当前对话？`)) return;
+  await deleteInterpretSessionQuietly(record);
+  record.messages = [];
+  record.conversationDigest = "";
+  record.appSessionUuid = "";
+  record.updatedAt = nowIso();
+  await saveStateSlice("interprets");
+  renderInterpretWorkspace();
+  renderInterpretList();
+}
+
 async function shareReportToChat(reportText) {
   const content = reportText || latestReport;
   if (!content) return;
@@ -1888,6 +2863,7 @@ async function selectCompany(id) {
   appState.index.selectedProjectId = projectsForCurrentCompany()[0]?.id || null;
   selectedKnowledgeId = null;
   selectedRecordId = null;
+  selectedInterpretId = null;
   await saveIndex();
   renderAll();
 }
@@ -1896,6 +2872,7 @@ async function selectProject(id) {
   if (!appState.projects.some((p) => p.id === id && p.companyId === appState.index.selectedCompanyId)) return;
   appState.index.selectedProjectId = id;
   selectedRecordId = null;
+  selectedInterpretId = null;
   await saveIndex();
   renderAll();
 }
@@ -1908,21 +2885,32 @@ async function deleteCompany(id = modalState.payload?.company?.id || appState.in
   const projectIds = new Set(companyProjects.map((p) => p.id));
   const knowledge = appState.knowledge.filter((k) => k.companyId === company.id);
   const reviews = appState.reviews.filter((r) => r.companyId === company.id || projectIds.has(r.projectId));
+  const interprets = appState.interprets.filter((r) => r.companyId === company.id || projectIds.has(r.projectId));
   appState.companies = appState.companies.filter((c) => c.id !== company.id);
   appState.projects = appState.projects.filter((p) => p.companyId !== company.id);
   appState.knowledge = appState.knowledge.filter((k) => k.companyId !== company.id);
   appState.reviews = appState.reviews.filter((r) => r.companyId !== company.id && !projectIds.has(r.projectId));
+  appState.interprets = appState.interprets.filter((r) => r.companyId !== company.id && !projectIds.has(r.projectId));
+  selectedInterpretId = null;
   ensureValidSelection();
   await Promise.all([
     saveStateSlice("companies"),
     saveStateSlice("projects"),
     saveStateSlice("knowledge"),
     saveStateSlice("reviews"),
+    saveStateSlice("interprets"),
     saveIndex(),
   ]);
+  await Promise.all(interprets.map((r) => deleteInterpretSessionQuietly(r)));
   await Promise.all([
     ...knowledge.flatMap((k) => [deleteFileQuietly(runtime, k.sourceFilePath), deleteFileQuietly(runtime, k.textPath)]),
     ...reviews.flatMap((r) => [deleteFileQuietly(runtime, r.sourceFilePath), deleteFileQuietly(runtime, r.extractedTextPath), deleteFileQuietly(runtime, r.reportPath)]),
+    ...interprets.flatMap((r) => [
+      deleteFileQuietly(runtime, r.sourceFilePath),
+      deleteFileQuietly(runtime, r.extractedTextPath),
+      deleteFileQuietly(runtime, r.analysisPath),
+      deleteFileQuietly(runtime, r.evidenceIndexPath || r.evidenceIndex?.path),
+    ]),
   ]);
   closeModal();
   renderAll();
@@ -1931,17 +2919,29 @@ async function deleteCompany(id = modalState.payload?.company?.id || appState.in
 async function deleteProject(id = modalState.payload?.project?.id || appState.index.selectedProjectId) {
   const runtime = await annaReady;
   const project = appState.projects.find((p) => p.id === id && p.companyId === appState.index.selectedCompanyId);
-  if (!project || !confirm(`删除项目「${project.name}」及其审查记录？`)) return;
+  if (!project || !confirm(`删除项目「${project.name}」及其审查记录和解读记录？`)) return;
   const reviews = appState.reviews.filter((r) => r.projectId === project.id);
+  const interprets = appState.interprets.filter((r) => r.projectId === project.id);
   appState.projects = appState.projects.filter((p) => p.id !== project.id);
   appState.reviews = appState.reviews.filter((r) => r.projectId !== project.id);
+  appState.interprets = appState.interprets.filter((r) => r.projectId !== project.id);
+  selectedInterpretId = null;
   appState.index.selectedProjectId = projectsForCurrentCompany()[0]?.id || null;
-  await Promise.all([saveStateSlice("projects"), saveStateSlice("reviews"), saveIndex()]);
-  await Promise.all(reviews.flatMap((r) => [
-    deleteFileQuietly(runtime, r.sourceFilePath),
-    deleteFileQuietly(runtime, r.extractedTextPath),
-    deleteFileQuietly(runtime, r.reportPath),
-  ]));
+  await Promise.all([saveStateSlice("projects"), saveStateSlice("reviews"), saveStateSlice("interprets"), saveIndex()]);
+  await Promise.all(interprets.map((r) => deleteInterpretSessionQuietly(r)));
+  await Promise.all([
+    ...reviews.flatMap((r) => [
+      deleteFileQuietly(runtime, r.sourceFilePath),
+      deleteFileQuietly(runtime, r.extractedTextPath),
+      deleteFileQuietly(runtime, r.reportPath),
+    ]),
+    ...interprets.flatMap((r) => [
+      deleteFileQuietly(runtime, r.sourceFilePath),
+      deleteFileQuietly(runtime, r.extractedTextPath),
+      deleteFileQuietly(runtime, r.analysisPath),
+      deleteFileQuietly(runtime, r.evidenceIndexPath || r.evidenceIndex?.path),
+    ]),
+  ]);
   closeModal();
   renderAll();
 }
@@ -1960,6 +2960,11 @@ function summarizeText(text) {
 
 function selectedProcessPages() {
   const value = Number(els.processPages?.value || 100);
+  return Number.isFinite(value) ? Math.min(Math.max(1, value), MAX_PROCESS_PAGES) : 100;
+}
+
+function selectedInterpretPages() {
+  const value = Number(els.interpretProcessPages?.value || 100);
   return Number.isFinite(value) ? Math.min(Math.max(1, value), MAX_PROCESS_PAGES) : 100;
 }
 
@@ -2033,6 +3038,7 @@ function bindDropZone(zone, input, onFile) {
 }
 
 bindDropZone(els.dropZone, els.fileInput, selectFile);
+bindDropZone(els.interpretDropZone, els.interpretFileInput, selectInterpretFile);
 
 for (const btn of els.navLinks) {
   btn.addEventListener("click", () => showMainTab(btn.dataset.tab));
@@ -2042,12 +3048,14 @@ els.companySelect.addEventListener("change", async () => {
   appState.index.selectedProjectId = projectsForCurrentCompany()[0]?.id || null;
   selectedKnowledgeId = null;
   selectedRecordId = null;
+  selectedInterpretId = null;
   await saveIndex();
   renderAll();
 });
 els.projectSelect.addEventListener("change", async () => {
   appState.index.selectedProjectId = els.projectSelect.value || null;
   selectedRecordId = null;
+  selectedInterpretId = null;
   await saveIndex();
   renderAll();
 });
@@ -2062,9 +3070,22 @@ els.knowledgeOpenUpload.addEventListener("click", () => {
 });
 els.emptyCompany.addEventListener("click", createCompany);
 els.emptyProject.addEventListener("click", createProject);
+els.interpretEmptyCompany.addEventListener("click", createCompany);
+els.interpretEmptyProject.addEventListener("click", createProject);
 els.analyze.addEventListener("click", runAnalysis);
+els.interpretAnalyze.addEventListener("click", runInterpretation);
+els.interpretChatSend.addEventListener("click", sendInterpretMessage);
+els.interpretChatInput.addEventListener("keydown", (event) => {
+  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+    event.preventDefault();
+    sendInterpretMessage();
+  }
+});
+els.interpretDownloadSource.addEventListener("click", () => downloadInterpretSourceFile(selectedInterpretId));
+els.interpretDownloadReport.addEventListener("click", () => downloadInterpretReport(selectedInterpretId));
+els.interpretClearChat.addEventListener("click", clearInterpretChat);
 
-for (const table of [els.recordList, els.knowledgeList, els.companyList, els.projectList]) {
+for (const table of [els.recordList, els.interpretList, els.knowledgeList, els.companyList, els.projectList]) {
   table.addEventListener("click", async (event) => {
     const btn = event.target.closest("[data-action]");
     if (!btn) return;
@@ -2074,6 +3095,10 @@ for (const table of [els.recordList, els.knowledgeList, els.companyList, els.pro
     if (action === "download-source") await downloadSourceFile(id);
     if (action === "download-record") await downloadRecord(id);
     if (action === "delete-record") await deleteRecord(id);
+    if (action === "open-interpret") await openInterpretRecord(id);
+    if (action === "download-interpret-source") await downloadInterpretSourceFile(id);
+    if (action === "download-interpret-report") await downloadInterpretReport(id);
+    if (action === "delete-interpret") await deleteInterpretRecord(id);
     if (action === "view-knowledge") await viewKnowledge(id);
     if (action === "edit-knowledge") await editKnowledge(id);
     if (action === "delete-knowledge") await deleteKnowledge(id);

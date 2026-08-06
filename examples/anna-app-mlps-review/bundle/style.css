@@ -433,6 +433,32 @@ label,
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.checkbox-field {
+  display: flex;
+  align-items: center;
+  min-height: 40px;
+  margin-top: 22px;
+  padding: 0 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+  color: var(--ink);
+  font-weight: 650;
+}
+
+.checkbox-field input {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  min-height: 0;
+  margin: 0;
+  accent-color: var(--primary);
+}
+
+.checkbox-field span {
+  min-width: 0;
+}
+
 .flat-controls {
   margin-top: 0;
 }
@@ -628,6 +654,10 @@ dd {
   overflow: hidden;
 }
 
+.compact-head {
+  padding: 16px 16px 0;
+}
+
 .tabs {
   display: flex;
   gap: 0;
@@ -804,6 +834,92 @@ dd {
 
 .markdown-output tr:last-child td {
   border-bottom: 0;
+}
+
+.interpret-chat {
+  margin-top: 16px;
+}
+
+.chat-list {
+  display: grid;
+  gap: 12px;
+  max-height: 420px;
+  min-height: 180px;
+  padding: 14px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-soft);
+}
+
+.chat-message {
+  display: grid;
+  max-width: 86%;
+  gap: 5px;
+}
+
+.chat-message.user {
+  justify-self: end;
+}
+
+.chat-message.assistant {
+  justify-self: start;
+}
+
+.chat-message header {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 720;
+}
+
+.chat-message.user header {
+  text-align: right;
+}
+
+.chat-bubble {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.chat-message.user .chat-bubble {
+  border-color: #bde3f7;
+  background: var(--primary-soft);
+}
+
+.chat-message.pending .chat-bubble {
+  color: var(--muted);
+}
+
+.pending-bubble::after {
+  content: "";
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  margin-left: 8px;
+  vertical-align: -2px;
+  border: 2px solid #cbd5e1;
+  border-top-color: var(--primary);
+  border-radius: 50%;
+  animation: spin 780ms linear infinite;
+}
+
+.chat-compose {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+  margin-top: 12px;
+}
+
+.chat-compose textarea {
+  min-height: 72px;
 }
 
 .table-shell {
@@ -1213,6 +1329,15 @@ dd {
 
   .workspace {
     padding: 14px;
+  }
+
+  .controls.two,
+  .chat-compose {
+    grid-template-columns: 1fr;
+  }
+
+  .chat-message {
+    max-width: 100%;
   }
 
   .context-selectors {
