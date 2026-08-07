@@ -9,18 +9,22 @@ performs the MLPS review. Logs go to stderr; stdout is JSON-RPC only.
 from __future__ import annotations
 
 import base64
+import csv
 import gc
 import hashlib
 import io
 import json
 import re
 import sys
+import tarfile
 import tempfile
 import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
+import zipfile
 
 import fitz
 import pytesseract
@@ -29,30 +33,35 @@ from PIL import Image
 
 
 MAX_BYTES = 200 * 1024 * 1024
+MAX_ARCHIVE_UNCOMPRESSED_BYTES = 500 * 1024 * 1024
+MAX_ARCHIVE_FILES = 200
+MAX_ARCHIVE_DEPTH = 5
+MAX_ARCHIVE_SKIPPED_DETAILS = 80
 DEFAULT_MAX_CHARS = 500_000
 DEFAULT_OCR_DPI = 120
 DEFAULT_MAX_OCR_PAGES = 20
 OCR_PAGE_TIMEOUT_SECONDS = 20
 OCR_TOTAL_BUDGET_SECONDS = 120
 DOWNLOAD_CACHE_DIR = Path(tempfile.gettempdir()) / "anna-mlps-review-cache"
+ARCHIVE_CACHE_DIR = DOWNLOAD_CACHE_DIR / "archives"
 
 MANIFEST: dict[str, Any] = {
     "name": "tool-intern2-document-extractor-u2n2j8x5",
     "display_name": "Document Extractor",
-    "version": "0.1.2",
-    "description": "Extract plain text from PDF, DOCX, TXT, and Markdown files for MLPS review.",
+    "version": "0.1.3",
+    "description": "Extract plain text from PDF, DOCX, XLSX, CSV, TXT, Markdown, and archive files for MLPS review.",
     "author": "Anna Developer",
     "license": "MIT",
-    "tags": ["document", "pdf", "docx", "txt", "markdown", "mlps", "compliance"],
+    "tags": ["document", "pdf", "docx", "xlsx", "csv", "archive", "txt", "markdown", "mlps", "compliance"],
     "tools": [
         {
             "name": "extract_document",
-            "description": "Extract plain text from a PDF, DOCX, TXT, or Markdown document.",
+            "description": "Extract plain text from a PDF, DOCX, XLSX, CSV, TXT, or Markdown document.",
             "parameters": [
                 {
                     "name": "filename",
                     "type": "string",
-                    "description": "Original filename ending in .pdf, .docx, .txt, or .md.",
+                    "description": "Original filename ending in .pdf, .docx, .xlsx, .csv, .txt, or .md.",
                     "required": True,
                 },
                 {
@@ -73,6 +82,27 @@ MANIFEST: dict[str, Any] = {
                     "name": "download_url",
                     "type": "string",
                     "description": "Short-lived HTTPS URL returned by Anna host upload for large files.",
+                    "required": False,
+                    "default": "",
+                },
+                {
+                    "name": "local_path",
+                    "type": "string",
+                    "description": "Local dev-only path under the user's Downloads directory.",
+                    "required": False,
+                    "default": "",
+                },
+                {
+                    "name": "archive_cache_id",
+                    "type": "string",
+                    "description": "Archive cache id returned by list_archive when extracting a single entry via extract_document.",
+                    "required": False,
+                    "default": "",
+                },
+                {
+                    "name": "entry_id",
+                    "type": "string",
+                    "description": "Optional archive entry id returned by list_archive. When present, filename must be the archive filename.",
                     "required": False,
                     "default": "",
                 },
@@ -112,7 +142,48 @@ MANIFEST: dict[str, Any] = {
                     "default": 0,
                 },
             ],
-        }
+        },
+        {
+            "name": "list_archive",
+            "description": "Recursively list supported documents inside a ZIP or TAR.GZ archive.",
+            "parameters": [
+                {"name": "filename", "type": "string", "description": "Original archive filename.", "required": True},
+                {"name": "bytes_b64", "type": "string", "description": "Base64-encoded archive bytes.", "required": False, "default": ""},
+                {"name": "download_url", "type": "string", "description": "Short-lived HTTPS URL returned by Anna host upload.", "required": False, "default": ""},
+                {"name": "local_path", "type": "string", "description": "Local dev-only path under the user's Downloads directory.", "required": False, "default": ""},
+                {"name": "max_files", "type": "integer", "description": "Maximum supported files to return.", "required": False, "default": MAX_ARCHIVE_FILES},
+                {"name": "max_depth", "type": "integer", "description": "Maximum nested archive depth.", "required": False, "default": MAX_ARCHIVE_DEPTH},
+                {"name": "max_uncompressed_bytes", "type": "integer", "description": "Maximum total uncompressed bytes to scan.", "required": False, "default": MAX_ARCHIVE_UNCOMPRESSED_BYTES},
+            ],
+        },
+        {
+            "name": "import_archive_chunk",
+            "description": "Import a local archive into the extractor cache in bounded base64 chunks, then return archive_cache_id.",
+            "parameters": [
+                {"name": "filename", "type": "string", "description": "Original archive filename.", "required": True},
+                {"name": "upload_id", "type": "string", "description": "Client-generated id for this chunked import.", "required": True},
+                {"name": "chunk_b64", "type": "string", "description": "Base64-encoded archive chunk.", "required": True},
+                {"name": "offset", "type": "integer", "description": "Byte offset of this chunk in the original file.", "required": True},
+                {"name": "total_size", "type": "integer", "description": "Total archive size in bytes.", "required": True},
+                {"name": "done", "type": "boolean", "description": "True when this is the final chunk.", "required": False, "default": False},
+            ],
+        },
+        {
+            "name": "extract_archive_entry",
+            "description": "Extract one listed archive entry by entry_id. PDF entries support page_start/page_count.",
+            "parameters": [
+                {"name": "filename", "type": "string", "description": "Original archive filename.", "required": True},
+                {"name": "entry_id", "type": "string", "description": "Entry id returned by list_archive.", "required": True},
+                {"name": "bytes_b64", "type": "string", "description": "Base64-encoded archive bytes.", "required": False, "default": ""},
+                {"name": "download_url", "type": "string", "description": "Short-lived HTTPS URL returned by Anna host upload.", "required": False, "default": ""},
+                {"name": "local_path", "type": "string", "description": "Local dev-only path under the user's Downloads directory.", "required": False, "default": ""},
+                {"name": "max_chars", "type": "integer", "description": "Maximum extracted text characters to return.", "required": False, "default": DEFAULT_MAX_CHARS},
+                {"name": "max_ocr_pages", "type": "integer", "description": "Maximum pages to OCR when a PDF entry has no text layer.", "required": False, "default": DEFAULT_MAX_OCR_PAGES},
+                {"name": "ocr_dpi", "type": "integer", "description": "PDF render DPI used for OCR.", "required": False, "default": DEFAULT_OCR_DPI},
+                {"name": "page_start", "type": "integer", "description": "1-based first PDF page to process.", "required": False, "default": 1},
+                {"name": "page_count", "type": "integer", "description": "Maximum number of PDF pages to process in this call.", "required": False, "default": 0},
+            ],
+        },
     ],
     "runtime": {"type": "uv", "min_version": "0.1.0"},
 }
@@ -128,6 +199,25 @@ def _clean_text(text: str) -> str:
 
 def _extension(filename: str) -> str:
     return (filename.rsplit(".", 1)[-1] if "." in filename else "").lower()
+
+
+def _archive_kind(filename: str) -> str:
+    lower = (filename or "").lower()
+    if lower.endswith(".zip"):
+        return "zip"
+    if lower.endswith(".tar.gz") or lower.endswith(".tgz"):
+        return "tar.gz"
+    return ""
+
+
+def _supported_document_ext(filename: str) -> str:
+    ext = _extension(filename)
+    return ext if ext in {"pdf", "docx", "xlsx", "csv", "txt", "md", "markdown"} else ""
+
+
+def _unsupported_office_ext(filename: str) -> str:
+    ext = _extension(filename)
+    return ext if ext in {"doc", "xls"} else ""
 
 
 def _decode_bytes(bytes_b64: str) -> bytes:
@@ -165,12 +255,13 @@ def _download_bytes(download_url: str) -> bytes:
     return b"".join(chunks)
 
 
-def _download_pdf_to_cache(download_url: str) -> Path:
+def _download_to_cache(download_url: str, suffix: str = ".bin") -> Path:
     parsed = urllib.parse.urlparse(download_url or "")
     cache_key = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
     digest = hashlib.sha256(cache_key.encode("utf-8")).hexdigest()
     DOWNLOAD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    path = DOWNLOAD_CACHE_DIR / f"{digest}.pdf"
+    safe_suffix = suffix if suffix.startswith(".") and re.match(r"^\.[A-Za-z0-9_.-]+$", suffix) else ".bin"
+    path = DOWNLOAD_CACHE_DIR / f"{digest}{safe_suffix}"
     if path.exists() and path.stat().st_size > 0:
         return path
 
@@ -197,6 +288,151 @@ def _download_pdf_to_cache(download_url: str) -> Path:
                 out.write(chunk)
     tmp_path.replace(path)
     return path
+
+
+def _download_pdf_to_cache(download_url: str) -> Path:
+    return _download_to_cache(download_url, ".pdf")
+
+
+def _load_local_dev_path(filename: str, local_path: str) -> Path:
+    if not local_path:
+        raise ValueError("local_path is required")
+    path = Path(local_path).expanduser().resolve()
+    downloads = (Path.home() / "Downloads").resolve()
+    if downloads not in path.parents:
+        raise ValueError("local_path is only allowed under the user's Downloads directory")
+    if path.name != Path(filename).name:
+        raise ValueError("local_path filename must match filename")
+    if not path.is_file():
+        raise ValueError(f"local_path does not exist: {path}")
+    if path.stat().st_size > MAX_BYTES:
+        raise ValueError(f"file exceeds {MAX_BYTES} bytes")
+    return path
+
+
+def _archive_suffix(filename: str) -> str:
+    lower = filename.lower()
+    if lower.endswith(".tar.gz"):
+        return ".tar.gz"
+    if lower.endswith(".tgz"):
+        return ".tgz"
+    if lower.endswith(".zip"):
+        return ".zip"
+    return ".archive"
+
+
+def _cache_bytes(raw: bytes, suffix: str) -> str:
+    if len(raw) > MAX_BYTES:
+        raise ValueError(f"file exceeds {MAX_BYTES} bytes")
+    ARCHIVE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(raw).hexdigest()
+    path = ARCHIVE_CACHE_DIR / f"{digest}{_archive_suffix(suffix)}"
+    if not path.exists() or path.stat().st_size != len(raw):
+        tmp_path = path.with_suffix(path.suffix + ".part")
+        tmp_path.write_bytes(raw)
+        tmp_path.replace(path)
+    return digest
+
+
+def _cache_import_chunk(
+    filename: str,
+    upload_id: str,
+    chunk_b64: str,
+    offset: int,
+    total_size: int,
+    done: bool,
+) -> dict[str, Any]:
+    if not _archive_kind(filename):
+        raise ValueError("only .zip, .tar.gz, and .tgz archives can be imported")
+    safe_upload_id = re.sub(r"[^A-Za-z0-9_-]", "", upload_id or "")
+    if len(safe_upload_id) < 8 or len(safe_upload_id) > 96:
+        raise ValueError("invalid upload_id")
+    offset = int(offset or 0)
+    total_size = int(total_size or 0)
+    if offset < 0 or total_size <= 0 or total_size > MAX_BYTES:
+        raise ValueError(f"invalid archive size; maximum is {MAX_BYTES} bytes")
+    try:
+        chunk = base64.b64decode(chunk_b64 or "", validate=True)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"invalid chunk_b64 payload: {exc}") from exc
+    if offset + len(chunk) > total_size:
+        raise ValueError("chunk exceeds declared total_size")
+
+    ARCHIVE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    part_path = ARCHIVE_CACHE_DIR / f"import-{safe_upload_id}{_archive_suffix(filename)}.part"
+    if offset == 0 and part_path.exists():
+        part_path.unlink()
+    mode = "r+b" if part_path.exists() else "w+b"
+    with part_path.open(mode) as out:
+        out.seek(offset)
+        out.write(chunk)
+    received = part_path.stat().st_size
+    if received > MAX_BYTES:
+        part_path.unlink(missing_ok=True)
+        raise ValueError(f"archive exceeds {MAX_BYTES} bytes")
+    if not done:
+        return {
+            "complete": False,
+            "received_bytes": received,
+            "total_size": total_size,
+        }
+    if received != total_size:
+        raise ValueError(f"incomplete archive import: received {received} of {total_size} bytes")
+
+    digest = hashlib.sha256()
+    with part_path.open("rb") as src:
+        while True:
+            chunk = src.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    cache_id = digest.hexdigest()
+    final_path = ARCHIVE_CACHE_DIR / f"{cache_id}{_archive_suffix(filename)}"
+    if final_path.exists():
+        part_path.unlink(missing_ok=True)
+    else:
+        part_path.replace(final_path)
+    return {
+        "complete": True,
+        "archive_cache_id": cache_id,
+        "received_bytes": total_size,
+        "total_size": total_size,
+    }
+
+
+def _cached_archive_path(cache_id: str) -> Path:
+    safe = re.sub(r"[^a-fA-F0-9]", "", cache_id or "")
+    if len(safe) != 64:
+        raise ValueError("invalid archive_cache_id")
+    for path in ARCHIVE_CACHE_DIR.glob(f"{safe}.*"):
+        if path.is_file():
+            return path
+    raise ValueError("archive_cache_id not found")
+
+
+def _cache_id_from_path(path: Path) -> str:
+    name = path.name
+    match = re.match(r"^([a-fA-F0-9]{64})\.", name)
+    return match.group(1) if match else ""
+
+
+def _load_source(
+    filename: str,
+    bytes_b64: str,
+    download_url: str,
+    local_path: str = "",
+    cache_download: bool = False,
+    archive_cache_id: str = "",
+) -> bytes | Path:
+    if archive_cache_id:
+        return _cached_archive_path(archive_cache_id)
+    if local_path:
+        return _load_local_dev_path(filename, local_path)
+    if download_url and cache_download:
+        return _download_to_cache(download_url, _archive_suffix(filename))
+    if download_url and _extension(filename) == "pdf":
+        return _download_pdf_to_cache(download_url)
+    return _download_bytes(download_url) if download_url else _decode_bytes(bytes_b64)
 
 
 def _open_pdf(source: bytes | str | Path) -> fitz.Document:
@@ -417,10 +653,7 @@ def _extract_docx(raw: bytes) -> dict[str, Any]:
 
 def _extract_text(raw: bytes, kind: str) -> dict[str, Any]:
     warnings: list[str] = []
-    try:
-        text = raw.decode("utf-8-sig")
-    except UnicodeDecodeError as exc:
-        raise ValueError(f"{kind.upper()} 必须使用 UTF-8 编码：{exc}") from exc
+    text = _decode_text_with_fallback(raw, ["utf-8-sig", "utf-8"])
     text = _clean_text(text)
     if not text:
         warnings.append(f"{kind.upper()} 未抽取到正文文本")
@@ -428,6 +661,94 @@ def _extract_text(raw: bytes, kind: str) -> dict[str, Any]:
         "kind": kind,
         "text": text,
         "line_count": len(text.splitlines()) if text else 0,
+        "warnings": warnings,
+    }
+
+
+def _decode_text_with_fallback(raw: bytes, encodings: list[str]) -> str:
+    last_error: Exception | None = None
+    for encoding in encodings:
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError as exc:
+            last_error = exc
+    raise ValueError(f"文本编码无法识别，请使用 UTF-8 或 GB18030 编码：{last_error}")
+
+
+def _extract_csv(raw: bytes) -> dict[str, Any]:
+    warnings: list[str] = []
+    text = _decode_text_with_fallback(raw, ["utf-8-sig", "utf-8", "gb18030"])
+    sample = text[:4096]
+    try:
+        dialect = csv.Sniffer().sniff(sample)
+    except Exception:  # noqa: BLE001
+        dialect = csv.excel
+    rows: list[str] = []
+    try:
+        reader = csv.reader(io.StringIO(text), dialect)
+        for row_index, row in enumerate(reader, start=1):
+            cells = [_clean_text(cell) for cell in row]
+            rows.append(" | ".join(cells))
+            if row_index >= 5000:
+                warnings.append("CSV 超过 5000 行，已截断读取")
+                break
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"CSV 解析失败：{exc}") from exc
+    extracted = _clean_text("\n".join(row for row in rows if row.strip()))
+    if not extracted:
+        warnings.append("CSV 未抽取到正文文本")
+    return {
+        "kind": "csv",
+        "text": extracted,
+        "row_count": len(rows),
+        "warnings": warnings,
+    }
+
+
+def _extract_xlsx(raw: bytes) -> dict[str, Any]:
+    try:
+        from openpyxl import load_workbook
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError("缺少 openpyxl 依赖，无法抽取 XLSX 文件") from exc
+
+    warnings: list[str] = []
+    try:
+        workbook = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"XLSX 打开失败：{exc}") from exc
+
+    sheet_chunks: list[str] = []
+    sheet_count = 0
+    row_count = 0
+    try:
+        for sheet in workbook.worksheets:
+            sheet_count += 1
+            rows: list[str] = []
+            for index, row in enumerate(sheet.iter_rows(values_only=True), start=1):
+                values = [
+                    _clean_text(str(value))
+                    for value in row
+                    if value is not None and _clean_text(str(value))
+                ]
+                if values:
+                    rows.append(" | ".join(values))
+                row_count += 1
+                if index >= 2000:
+                    warnings.append(f"工作表 {sheet.title} 超过 2000 行，已截断读取")
+                    break
+            if rows:
+                sheet_chunks.append(f"--- 工作表：{sheet.title} ---\n" + "\n".join(rows))
+    finally:
+        workbook.close()
+
+    text = _clean_text("\n\n".join(sheet_chunks))
+    if not text:
+        warnings.append("XLSX 未抽取到正文文本")
+    return {
+        "kind": "xlsx",
+        "text": text,
+        "sheet_count": sheet_count,
+        "row_count": row_count,
         "warnings": warnings,
     }
 
@@ -443,8 +764,8 @@ def _extract_raw(
     page_count: int = 0,
 ) -> dict[str, Any]:
     ext = _extension(filename)
-    if ext not in {"pdf", "docx", "txt", "md", "markdown"}:
-        raise ValueError("only .pdf, .docx, .txt, and .md are supported")
+    if not _supported_document_ext(filename):
+        raise ValueError("only .pdf, .docx, .xlsx, .csv, .txt, and .md are supported")
     source_size = Path(source).stat().st_size if isinstance(source, (str, Path)) else len(source)
     if source_size > MAX_BYTES:
         raise ValueError(f"file exceeds {MAX_BYTES} bytes")
@@ -455,6 +776,14 @@ def _extract_raw(
         if not isinstance(source, bytes):
             source = Path(source).read_bytes()
         result = _extract_docx(source)
+    elif ext == "xlsx":
+        if not isinstance(source, bytes):
+            source = Path(source).read_bytes()
+        result = _extract_xlsx(source)
+    elif ext == "csv":
+        if not isinstance(source, bytes):
+            source = Path(source).read_bytes()
+        result = _extract_csv(source)
     else:
         if not isinstance(source, bytes):
             source = Path(source).read_bytes()
@@ -482,10 +811,239 @@ def _extract_raw(
     return result
 
 
+def _entry_id(chain: list[str]) -> str:
+    raw = json.dumps(chain, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _entry_chain(entry_id: str) -> list[str]:
+    padded = entry_id + ("=" * (-len(entry_id) % 4))
+    try:
+        value = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"invalid entry_id: {exc}") from exc
+    if not isinstance(value, list) or not value or not all(isinstance(item, str) and item for item in value):
+        raise ValueError("invalid entry_id payload")
+    return value
+
+
+def _safe_archive_path(name: str) -> str:
+    normalized = (name or "").replace("\\", "/").strip("/")
+    if not normalized:
+        return ""
+    parts = PurePosixPath(normalized).parts
+    if any(part in {"", ".", ".."} for part in parts):
+        return ""
+    if (name or "").startswith(("/", "\\")):
+        return ""
+    return "/".join(parts)
+
+
+def _skip_reason(name: str, size_bytes: int, is_dir: bool = False, unsafe: bool = False) -> str:
+    safe = _safe_archive_path(name)
+    base = safe.rsplit("/", 1)[-1] if safe else name
+    if is_dir:
+        return "目录"
+    if unsafe or not safe:
+        return "不安全路径"
+    if safe.startswith("__MACOSX/") or base in {".DS_Store"} or base.startswith("._"):
+        return "macOS 元数据"
+    if base.startswith("~$") or base.startswith(".~"):
+        return "Office 临时文件"
+    if _unsupported_office_ext(base):
+        return "旧版 Office 格式暂不支持"
+    if _archive_kind(base) or _supported_document_ext(base):
+        if size_bytes > MAX_BYTES:
+            return f"文件超过 {MAX_BYTES} 字节"
+        return ""
+    return "不支持的文件类型"
+
+
+def _zip_display_name(info: zipfile.ZipInfo) -> str:
+    if info.flag_bits & 0x800:
+        return info.filename
+    try:
+        raw = info.filename.encode("cp437")
+    except Exception:  # noqa: BLE001
+        return info.filename
+    for encoding in ("utf-8", "gb18030"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return info.filename
+
+
+def _source_fileobj(source: bytes | str | Path) -> io.BytesIO | Path:
+    if isinstance(source, (str, Path)):
+        return Path(source)
+    return io.BytesIO(source)
+
+
+def _open_zip(source: bytes | str | Path) -> zipfile.ZipFile:
+    fileobj = _source_fileobj(source)
+    return zipfile.ZipFile(fileobj if not isinstance(fileobj, Path) else str(fileobj))
+
+
+def _open_tar(source: bytes | str | Path) -> tarfile.TarFile:
+    fileobj = _source_fileobj(source)
+    if isinstance(fileobj, Path):
+        return tarfile.open(str(fileobj), mode="r:*")
+    return tarfile.open(fileobj=fileobj, mode="r:*")
+
+
+def _archive_member_kind(filename: str) -> str:
+    archive = _archive_kind(filename)
+    if archive:
+        return "archive"
+    return _supported_document_ext(filename)
+
+
+def _make_entry(chain: list[str], display_path: str, size_bytes: int) -> dict[str, Any]:
+    return {
+        "entry_id": _entry_id(chain),
+        "path": display_path,
+        "filename": display_path.rsplit("/", 1)[-1],
+        "kind": _archive_member_kind(display_path),
+        "size_bytes": size_bytes,
+    }
+
+
+def _list_archive_source(
+    archive_name: str,
+    source: bytes | str | Path,
+    chain: list[str],
+    prefix: str,
+    depth: int,
+    limits: dict[str, int],
+    state: dict[str, Any],
+) -> None:
+    if depth > limits["max_depth"]:
+        state["warnings"].append(f"压缩包嵌套深度超过 {limits['max_depth']}，已跳过：{prefix or archive_name}")
+        return
+
+    kind = _archive_kind(archive_name)
+    if not kind:
+        state["warnings"].append(f"不支持的压缩包格式：{archive_name}")
+        return
+
+    def consider_file(name: str, size_bytes: int, read_bytes: Any, unsafe: bool = False, display_name: str = "") -> None:
+        safe_name = _safe_archive_path(name)
+        safe_display_name = _safe_archive_path(display_name or name) or safe_name
+        display_path = f"{prefix}/{safe_display_name}" if prefix and safe_display_name else safe_display_name
+        reason = _skip_reason(name, size_bytes, False, unsafe)
+        if reason:
+            state["skipped"].append({"path": display_path or name, "size_bytes": size_bytes, "reason": reason})
+            return
+        if state["total_uncompressed_bytes"] + size_bytes > limits["max_uncompressed_bytes"]:
+            state["skipped"].append({"path": display_path, "size_bytes": size_bytes, "reason": "超过压缩包总解压大小限制"})
+            state["truncated"] = True
+            return
+        state["total_uncompressed_bytes"] += size_bytes
+
+        child_chain = [*chain, safe_name]
+        if _archive_kind(safe_name):
+            try:
+                nested = read_bytes()
+            except Exception as exc:  # noqa: BLE001
+                state["skipped"].append({"path": display_path, "size_bytes": size_bytes, "reason": f"嵌套压缩包读取失败：{exc}"})
+                return
+            _list_archive_source(safe_name, nested, child_chain, display_path, depth + 1, limits, state)
+            return
+
+        if len(state["entries"]) >= limits["max_files"]:
+            state["skipped"].append({"path": display_path, "size_bytes": size_bytes, "reason": "超过可处理文件数量限制"})
+            state["truncated"] = True
+            return
+        state["entries"].append(_make_entry(child_chain, display_path, size_bytes))
+
+    def read_tar_member(archive: tarfile.TarFile, member: tarfile.TarInfo) -> bytes:
+        stream = archive.extractfile(member)
+        return stream.read() if stream else b""
+
+    try:
+        if kind == "zip":
+            with _open_zip(source) as archive:
+                for info in archive.infolist():
+                    unsafe = not _safe_archive_path(info.filename)
+                    if info.is_dir():
+                        continue
+                    consider_file(
+                        info.filename,
+                        int(info.file_size or 0),
+                        lambda i=info: archive.read(i),
+                        unsafe,
+                        _zip_display_name(info),
+                    )
+        else:
+            with _open_tar(source) as archive:
+                for member in archive.getmembers():
+                    unsafe = not _safe_archive_path(member.name) or member.issym() or member.islnk() or member.isdev()
+                    if member.isdir():
+                        continue
+                    consider_file(
+                        member.name,
+                        int(member.size or 0),
+                        lambda m=member: read_tar_member(archive, m),
+                        unsafe,
+                    )
+    except (zipfile.BadZipFile, tarfile.TarError) as exc:
+        raise ValueError(f"压缩包打开失败：{exc}") from exc
+
+
+def _read_archive_entry_source(
+    archive_name: str,
+    source: bytes | str | Path,
+    chain: list[str],
+    depth: int = 1,
+) -> tuple[str, bytes]:
+    if depth > MAX_ARCHIVE_DEPTH:
+        raise ValueError(f"压缩包嵌套深度超过 {MAX_ARCHIVE_DEPTH}")
+    if not chain:
+        raise ValueError("empty archive entry chain")
+
+    target = chain[0]
+    kind = _archive_kind(archive_name)
+    if kind == "zip":
+        with _open_zip(source) as archive:
+            try:
+                info = archive.getinfo(target)
+            except KeyError as exc:
+                raise ValueError(f"压缩包中未找到文件：{target}") from exc
+            if info.is_dir():
+                raise ValueError(f"压缩包条目是目录：{target}")
+            data = archive.read(info)
+    elif kind == "tar.gz":
+        with _open_tar(source) as archive:
+            try:
+                member = archive.getmember(target)
+            except KeyError as exc:
+                raise ValueError(f"压缩包中未找到文件：{target}") from exc
+            if member.isdir() or member.issym() or member.islnk() or member.isdev():
+                raise ValueError(f"压缩包条目不是普通文件：{target}")
+            stream = archive.extractfile(member)
+            if stream is None:
+                raise ValueError(f"压缩包条目无法读取：{target}")
+            data = stream.read()
+    else:
+        raise ValueError(f"不支持的压缩包格式：{archive_name}")
+
+    if len(data) > MAX_BYTES:
+        raise ValueError(f"压缩包内文件超过 {MAX_BYTES} 字节：{target}")
+    if len(chain) == 1:
+        return target, data
+    if not _archive_kind(target):
+        raise ValueError(f"条目不是嵌套压缩包：{target}")
+    return _read_archive_entry_source(target, data, chain[1:], depth + 1)
+
+
 def tool_extract_document(
     filename: str,
     bytes_b64: str = "",
     download_url: str = "",
+    local_path: str = "",
+    archive_cache_id: str = "",
+    entry_id: str = "",
     mime_type: str = "",
     max_chars: int = DEFAULT_MAX_CHARS,
     max_ocr_pages: int = DEFAULT_MAX_OCR_PAGES,
@@ -494,14 +1052,40 @@ def tool_extract_document(
     page_count: int = 0,
 ) -> dict[str, Any]:
     filename = (filename or "").strip()
-    ext = _extension(filename)
-    if ext not in {"pdf", "docx", "txt", "md", "markdown"}:
-        raise ValueError("only .pdf, .docx, .txt, and .md are supported")
+    if entry_id:
+        if not _archive_kind(filename):
+            raise ValueError("entry_id requires an archive filename")
+        source = _load_source(filename, bytes_b64, download_url, local_path, cache_download=True, archive_cache_id=archive_cache_id)
+        chain = _entry_chain(entry_id)
+        if any(not _safe_archive_path(item) for item in chain):
+            raise ValueError("archive entry contains unsafe path")
+        entry_name, entry_bytes = _read_archive_entry_source(filename, source, chain)
+        if not _supported_document_ext(entry_name):
+            raise ValueError("archive entry type is not supported")
+        result = _extract_raw(
+            entry_name,
+            entry_bytes,
+            mime_type,
+            max_chars,
+            max_ocr_pages,
+            ocr_dpi,
+            page_start,
+            page_count,
+        )
+        result.update(
+            {
+                "archive_filename": filename,
+                "entry_id": entry_id,
+                "entry_path": "/".join(chain),
+                "filename": "/".join(chain),
+            }
+        )
+        return result
 
-    if download_url and ext == "pdf":
-        source: bytes | Path = _download_pdf_to_cache(download_url)
-    else:
-        source = _download_bytes(download_url) if download_url else _decode_bytes(bytes_b64)
+    if not _supported_document_ext(filename):
+        raise ValueError("only .pdf, .docx, .xlsx, .csv, .txt, and .md are supported")
+
+    source = _load_source(filename, bytes_b64, download_url, local_path)
     return _extract_raw(
         filename,
         source,
@@ -514,7 +1098,127 @@ def tool_extract_document(
     )
 
 
-TOOL_DISPATCH = {"extract_document": tool_extract_document}
+def tool_list_archive(
+    filename: str,
+    bytes_b64: str = "",
+    download_url: str = "",
+    local_path: str = "",
+    archive_cache_id: str = "",
+    mime_type: str = "",
+    max_files: int = MAX_ARCHIVE_FILES,
+    max_depth: int = MAX_ARCHIVE_DEPTH,
+    max_uncompressed_bytes: int = MAX_ARCHIVE_UNCOMPRESSED_BYTES,
+) -> dict[str, Any]:
+    filename = (filename or "").strip()
+    if not _archive_kind(filename):
+        raise ValueError("only .zip, .tar.gz, and .tgz archives are supported")
+    source = _load_source(filename, bytes_b64, download_url, local_path, cache_download=True, archive_cache_id=archive_cache_id)
+    cache_id = archive_cache_id
+    if isinstance(source, bytes):
+        cache_id = _cache_bytes(source, filename)
+        source = _cached_archive_path(cache_id)
+    elif isinstance(source, (str, Path)):
+        cache_id = _cache_id_from_path(Path(source)) or archive_cache_id
+    source_size = Path(source).stat().st_size if isinstance(source, (str, Path)) else len(source)
+    if source_size > MAX_BYTES:
+        raise ValueError(f"archive exceeds {MAX_BYTES} bytes")
+
+    limits = {
+        "max_files": max(1, min(int(max_files or MAX_ARCHIVE_FILES), MAX_ARCHIVE_FILES)),
+        "max_depth": max(1, min(int(max_depth or MAX_ARCHIVE_DEPTH), MAX_ARCHIVE_DEPTH)),
+        "max_uncompressed_bytes": max(
+            1024 * 1024,
+            min(int(max_uncompressed_bytes or MAX_ARCHIVE_UNCOMPRESSED_BYTES), MAX_ARCHIVE_UNCOMPRESSED_BYTES),
+        ),
+    }
+    state: dict[str, Any] = {
+        "entries": [],
+        "skipped": [],
+        "warnings": [],
+        "total_uncompressed_bytes": 0,
+        "truncated": False,
+    }
+    _list_archive_source(filename, source, [], "", 1, limits, state)
+    return {
+        "kind": "archive",
+        "archive_kind": _archive_kind(filename),
+        "filename": filename,
+        "size_bytes": source_size,
+        "entries": state["entries"],
+        "skipped": state["skipped"][:MAX_ARCHIVE_SKIPPED_DETAILS],
+        "warnings": state["warnings"],
+        "file_count": len(state["entries"]),
+        "skipped_count": len(state["skipped"]),
+        "skipped_detail_count": min(len(state["skipped"]), MAX_ARCHIVE_SKIPPED_DETAILS),
+        "total_uncompressed_bytes": state["total_uncompressed_bytes"],
+        "archive_cache_id": cache_id,
+        "truncated": state["truncated"],
+        "limits": limits,
+    }
+
+
+def tool_import_archive_chunk(
+    filename: str,
+    upload_id: str,
+    chunk_b64: str,
+    offset: int,
+    total_size: int,
+    done: bool = False,
+) -> dict[str, Any]:
+    return _cache_import_chunk(filename, upload_id, chunk_b64, offset, total_size, bool(done))
+
+
+def tool_extract_archive_entry(
+    filename: str,
+    entry_id: str,
+    bytes_b64: str = "",
+    download_url: str = "",
+    local_path: str = "",
+    archive_cache_id: str = "",
+    mime_type: str = "",
+    max_chars: int = DEFAULT_MAX_CHARS,
+    max_ocr_pages: int = DEFAULT_MAX_OCR_PAGES,
+    ocr_dpi: int = DEFAULT_OCR_DPI,
+    page_start: int = 1,
+    page_count: int = 0,
+) -> dict[str, Any]:
+    filename = (filename or "").strip()
+    if not _archive_kind(filename):
+        raise ValueError("only .zip, .tar.gz, and .tgz archives are supported")
+    source = _load_source(filename, bytes_b64, download_url, local_path, cache_download=True, archive_cache_id=archive_cache_id)
+    chain = _entry_chain(entry_id)
+    if any(not _safe_archive_path(item) for item in chain):
+        raise ValueError("archive entry contains unsafe path")
+    entry_name, entry_bytes = _read_archive_entry_source(filename, source, chain)
+    if not _supported_document_ext(entry_name):
+        raise ValueError("archive entry type is not supported")
+    result = _extract_raw(
+        entry_name,
+        entry_bytes,
+        "",
+        max_chars,
+        max_ocr_pages,
+        ocr_dpi,
+        page_start,
+        page_count,
+    )
+    result.update(
+        {
+            "archive_filename": filename,
+            "entry_id": entry_id,
+            "entry_path": "/".join(chain),
+            "filename": "/".join(chain),
+        }
+    )
+    return result
+
+
+TOOL_DISPATCH = {
+    "extract_document": tool_extract_document,
+    "list_archive": tool_list_archive,
+    "import_archive_chunk": tool_import_archive_chunk,
+    "extract_archive_entry": tool_extract_archive_entry,
+}
 
 
 def handle_describe(_params: dict[str, Any]) -> dict[str, Any]:

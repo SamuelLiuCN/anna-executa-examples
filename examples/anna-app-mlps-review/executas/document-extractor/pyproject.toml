@@ -1,11 +1,12 @@
 [project]
 name = "tool-intern2-document-extractor-u2n2j8x5"
-version = "0.1.2"
-description = "Anna Executa document text extractor for MLPS Review"
+version = "0.1.3"
+description = "Anna Executa document and archive text extractor for MLPS Review"
 requires-python = ">=3.11"
 dependencies = [
   "Pillow>=10.4.0",
   "PyMuPDF>=1.24.10",
+  "openpyxl>=3.1.5",
   "pytesseract>=0.3.13",
   "python-docx>=1.1.2"
 ]

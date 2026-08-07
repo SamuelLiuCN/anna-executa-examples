@@ -2,7 +2,6 @@ import { AnnaAppRuntime } from "/static/anna-apps/_sdk/latest/index.js";
 
 const EXECUTA_HANDLE = "document-extractor";
 const DEV_FALLBACK_TOOL_ID = "tool-intern2-document-extractor-u2n2j8x5";
-const LEGACY_LOCAL_TOOL_ID = "tool-test-document-extractor-12345678";
 const BUNDLED_TOOL_ID = `bundled:${EXECUTA_HANDLE}`;
 const EXECUTA_TOOL_IDS = Array.from(new Set([
   BUNDLED_TOOL_ID,
@@ -10,9 +9,11 @@ const EXECUTA_TOOL_IDS = Array.from(new Set([
     window.__ANNA_TOOL_IDS__ &&
     window.__ANNA_TOOL_IDS__[EXECUTA_HANDLE],
   DEV_FALLBACK_TOOL_ID,
-  LEGACY_LOCAL_TOOL_ID,
 ].filter(Boolean)));
 const EXECUTA_METHOD = "extract_document";
+const EXECUTA_LIST_ARCHIVE_METHOD = "list_archive";
+const EXECUTA_ARCHIVE_ENTRY_METHOD = "extract_archive_entry";
+const EXECUTA_IMPORT_ARCHIVE_CHUNK_METHOD = "import_archive_chunk";
 
 const STORAGE_KEYS = {
   index: "mlps:v1:index",
@@ -24,6 +25,8 @@ const STORAGE_KEYS = {
 };
 
 const INLINE_CAP_BYTES = 8 * 1024 * 1024;
+const ARCHIVE_IMPORT_CHUNK_BYTES = 64 * 1024;
+const ARCHIVE_IMPORT_MIN_CHUNK_BYTES = 16 * 1024;
 const MAX_FILE_BYTES = 200 * 1024 * 1024;
 const TOOL_HOST_TIMEOUT_MS = 180000;
 const TOOL_CLIENT_TIMEOUT_MS = 190000;
@@ -33,6 +36,9 @@ const INTERPRET_PAGES_PER_TOOL_CALL = 5;
 const MIN_PAGES_PER_TOOL_CALL = 1;
 const MAX_PROCESS_PAGES = 500;
 const MAX_EXTRACT_CHARS = 500000;
+const MAX_ARCHIVE_FILES = 200;
+const MAX_ARCHIVE_DEPTH = 5;
+const MAX_ARCHIVE_UNCOMPRESSED_BYTES = 500 * 1024 * 1024;
 const MAX_LLM_CHARS = 90000;
 const MAX_KNOWLEDGE_ITEMS = 8;
 const MAX_KNOWLEDGE_CHARS = 40000;
@@ -48,6 +54,8 @@ const INTERPRET_EVIDENCE_OVERLAP_CHARS = 200;
 const INTERPRET_EVIDENCE_MAX_CHUNKS = 260;
 const INTERPRET_CONVERSATION_DIGEST_TRIGGER = 10;
 const TEXT_UPLOAD_TYPE = "text/plain; charset=utf-8";
+const REVIEW_SOURCE_LABEL = "PDF / DOCX / XLSX / CSV / TXT / MD / ZIP / TAR.GZ，最大 200 MB";
+const KNOWLEDGE_SOURCE_LABEL = "PDF / DOCX / TXT / MD，最大 200 MB";
 
 const CONTROL_TERMS = [
   "安全物理环境",
@@ -157,6 +165,7 @@ let modalState = { type: null, payload: null };
 let activeWorkstream = "review";
 let isSendingInterpretMessage = false;
 const interpretSessions = new Map();
+const localFileStore = new Map();
 let interpretRunId = null;
 
 const appState = {
@@ -302,6 +311,22 @@ function fileExt(name) {
   return (name.split(".").pop() || "").toLowerCase();
 }
 
+function archiveKind(name) {
+  const lower = String(name || "").toLowerCase();
+  if (lower.endsWith(".zip")) return "zip";
+  if (lower.endsWith(".tar.gz") || lower.endsWith(".tgz")) return "tar.gz";
+  return "";
+}
+
+function isArchiveName(name) {
+  return Boolean(archiveKind(name));
+}
+
+function localDevDownloadsPath(file) {
+  if (!isLocalDevOrigin() || !isArchiveName(file?.name || "")) return "";
+  return `/Users/samuel/Downloads/${file.name}`;
+}
+
 function basename(path) {
   const name = String(path || "").split("/").filter(Boolean).pop() || "";
   try {
@@ -312,7 +337,7 @@ function basename(path) {
 }
 
 function isSupported(file) {
-  return ["pdf", "docx", "txt", "md", "markdown"].includes(fileExt(file.name));
+  return isArchiveName(file.name) || ["pdf", "docx", "xlsx", "csv", "txt", "md", "markdown"].includes(fileExt(file.name));
 }
 
 function formatError(label, err) {
@@ -895,6 +920,33 @@ function rowActions(actions) {
   `;
 }
 
+function archiveSummaryHtml(archive) {
+  if (!archive) return "";
+  const entries = Array.isArray(archive.entries) ? archive.entries : [];
+  const skipped = Array.isArray(archive.skipped) ? archive.skipped : [];
+  const entryText = entries.length
+    ? entries
+        .slice(0, 30)
+        .map((entry) => `${entry.path || "-"}（${entry.kind || "-"}，${Number(entry.char_count || 0).toLocaleString("zh-CN")} 字）`)
+        .join("\n")
+    : "暂无参与文件";
+  const skippedText = skipped.length
+    ? skipped
+        .slice(0, 30)
+        .map((item) => `${item.path || "-"}：${item.reason || "已跳过"}`)
+        .join("\n")
+    : "无";
+  return `
+    <h4 class="modal-subtitle">压缩包来源</h4>
+    <dl class="meta-grid">
+      <div><dt>格式</dt><dd>${escapeHtml(archive.kind || "-")}</dd></div>
+      <div><dt>参与文件</dt><dd>${escapeHtml(`${archive.processedFileCount || 0}/${archive.fileCount || 0}`)}</dd></div>
+      <div><dt>跳过文件</dt><dd>${escapeHtml(String(skipped.length))}</dd></div>
+    </dl>
+    <pre class="output modal-output active">${escapeHtml(`参与文件：\n${entryText}\n\n跳过文件：\n${skippedText}${entries.length > 30 || skipped.length > 30 ? "\n\n（仅显示前 30 条）" : ""}`)}</pre>
+  `;
+}
+
 function openModal(type, payload = {}) {
   modalState = { type, payload };
   renderModal();
@@ -934,6 +986,7 @@ function renderModal() {
             <div><dt>时间</dt><dd>${escapeHtml(formatDate(record.createdAt))}</dd></div>
             <div><dt>知识库引用</dt><dd>${escapeHtml((record.knowledgeRefs || []).map((k) => k.title).join("；") || "未使用公司知识库")}</dd></div>
           </dl>
+          ${archiveSummaryHtml(record.sourceArchive)}
           ${viewMarkdown(payload.report || "暂无报告内容。")}
           ${payload.extracted ? `<h4 class="modal-subtitle">抽取文本节选</h4>${viewOutput(payload.extracted.slice(0, 12000))}` : ""}
         `;
@@ -1066,7 +1119,7 @@ function selectFile(file) {
   resetSteps();
 
   if (!selectedFile) {
-    els.fileMeta.textContent = "PDF / DOCX / TXT / MD，最大 200 MB";
+    els.fileMeta.textContent = REVIEW_SOURCE_LABEL;
     els.statName.textContent = "未选择";
     els.statText.textContent = "0 字";
     els.statKnowledge.textContent = "0 条";
@@ -1084,7 +1137,7 @@ function selectFile(file) {
   els.statModel.textContent = "等待";
 
   if (!isSupported(selectedFile)) {
-    setReportPlain("仅支持 .pdf、.docx、.txt、.md 文件。");
+    setReportPlain("仅支持 .pdf、.docx、.xlsx、.csv、.txt、.md、.zip、.tar.gz、.tgz 文件。");
     selectedFile = null;
   } else if (selectedFile.size > MAX_FILE_BYTES) {
     setReportPlain(`文件过大：${formatBytes(selectedFile.size)}。当前限制为 ${formatBytes(MAX_FILE_BYTES)}。`);
@@ -1101,12 +1154,12 @@ function selectKnowledgeFile(file) {
   const meta = $("knowledge-file-meta");
   const title = $("knowledge-title");
   if (!selectedKnowledgeFile) {
-    if (meta) meta.textContent = "PDF / DOCX / TXT / MD，最大 200 MB";
+    if (meta) meta.textContent = KNOWLEDGE_SOURCE_LABEL;
     updateActionState();
     return;
   }
   if (meta) meta.textContent = `${selectedKnowledgeFile.name} · ${formatBytes(selectedKnowledgeFile.size)}`;
-  if (!isSupported(selectedKnowledgeFile)) {
+  if (!["pdf", "docx", "txt", "md", "markdown"].includes(fileExt(selectedKnowledgeFile.name))) {
     if (meta) meta.textContent = "仅支持 .pdf、.docx、.txt、.md 文件。";
     selectedKnowledgeFile = null;
   } else if (selectedKnowledgeFile.size > MAX_FILE_BYTES) {
@@ -1128,7 +1181,7 @@ function selectInterpretFile(file) {
   els.interpretStatSession.textContent = "等待";
 
   if (!selectedInterpretFile) {
-    els.interpretFileMeta.textContent = "PDF / DOCX / TXT / MD，最大 200 MB";
+    els.interpretFileMeta.textContent = REVIEW_SOURCE_LABEL;
     els.interpretStatName.textContent = "未选择";
     els.interpretStatText.textContent = "0 字";
     els.interpretStatKnowledge.textContent = "0 条";
@@ -1143,7 +1196,7 @@ function selectInterpretFile(file) {
   els.interpretStatKnowledge.textContent = "等待";
 
   if (!isSupported(selectedInterpretFile)) {
-    els.interpretReport.textContent = "仅支持 .pdf、.docx、.txt、.md 文件。";
+    els.interpretReport.textContent = "仅支持 .pdf、.docx、.xlsx、.csv、.txt、.md、.zip、.tar.gz、.tgz 文件。";
     selectedInterpretFile = null;
     els.interpretDownloadSource.disabled = true;
     els.interpretDownloadReport.disabled = true;
@@ -1196,19 +1249,65 @@ function extractContent(reply) {
 
 async function uploadFileToPath(runtime, file, path, contentType) {
   setProgress("正在协商源文件上传地址", null);
-  const init = await runtime.files.upload_init({
-    path,
-    content_type: contentType,
-    size: file.size,
-  });
+  if (isArchiveName(file.name) && isLocalDevOrigin()) {
+    localFileStore.set(path, {
+      file,
+      filename: file.name,
+      contentType,
+      size: file.size,
+      transient: true,
+      createdAt: nowIso(),
+    });
+    setProgress("本地 dev 模式：压缩包跳过 R2 直传，直接进入本地抽取", null);
+    return path;
+  }
+  let init;
+  try {
+    init = await runtime.files.upload_init({
+      path,
+      content_type: contentType,
+      size: file.size,
+    });
+  } catch (err) {
+    if (!isNotImplementedError(err)) throw err;
+    if (file.size > INLINE_CAP_BYTES) {
+      throw new Error(`当前是本地 legacy 模式，不支持 ${formatBytes(file.size)} 的大文件上传。请切换到 APS / staging，或使用 8MB 以内的小文件调试。`);
+    }
+    localFileStore.set(path, {
+      file,
+      filename: file.name,
+      contentType,
+      size: file.size,
+      createdAt: nowIso(),
+    });
+    setProgress("本地 dev 模式：源文件已暂存到浏览器内存", null);
+    return path;
+  }
   const putUrl = init.put_url || init.upload_url;
   if (!putUrl) {
     throw new Error(`files.upload_init 未返回 put_url/upload_url，返回字段：${Object.keys(init || {}).join(", ")}`);
   }
-  const put = await putWithProgress(putUrl, file, normalizeHeaders(init.headers), (loaded, total) => {
-    const percent = total ? (loaded / total) * 100 : null;
-    setProgress(`正在上传源文件 ${formatBytes(loaded)} / ${formatBytes(total || file.size)}`, percent);
-  });
+  const putHeaders = normalizeHeaders(init.headers);
+  let put;
+  try {
+    put = await putFileWithFallback(putUrl, file, putHeaders, (loaded, total) => {
+      const percent = total ? (loaded / total) * 100 : null;
+      setProgress(`正在上传源文件 ${formatBytes(loaded)} / ${formatBytes(total || file.size)}`, percent);
+    });
+  } catch (err) {
+    if (!isArchiveName(file.name)) throw err;
+    localFileStore.set(path, {
+      file,
+      filename: file.name,
+      contentType,
+      size: file.size,
+      uploadError: errorMessage(err),
+      transient: true,
+      createdAt: nowIso(),
+    });
+    setProgress("R2 直传失败，已切换为本地临时压缩包抽取", null);
+    return path;
+  }
   const etag =
     (put.etag || "").replace(/"/g, "") ||
     init.upload_id ||
@@ -1220,11 +1319,25 @@ async function uploadFileToPath(runtime, file, path, contentType) {
 
 async function writeTextFile(runtime, path, text) {
   const bytes = new TextEncoder().encode(text);
-  const init = await runtime.files.upload_init({
-    path,
-    content_type: TEXT_UPLOAD_TYPE,
-    size: bytes.length,
-  });
+  let init;
+  try {
+    init = await runtime.files.upload_init({
+      path,
+      content_type: TEXT_UPLOAD_TYPE,
+      size: bytes.length,
+    });
+  } catch (err) {
+    if (!isNotImplementedError(err)) throw err;
+    localFileStore.set(path, {
+      text,
+      bytes,
+      filename: basename(path),
+      contentType: TEXT_UPLOAD_TYPE,
+      size: bytes.length,
+      createdAt: nowIso(),
+    });
+    return path;
+  }
   const putUrl = init.put_url || init.upload_url;
   if (!putUrl) {
     throw new Error(`files.upload_init 未返回 put_url/upload_url，返回字段：${Object.keys(init || {}).join(", ")}`);
@@ -1246,6 +1359,41 @@ async function writeTextFile(runtime, path, text) {
   return path;
 }
 
+async function putFileWithFallback(url, body, headers, onProgress, timeoutMs = 10 * 60 * 1000) {
+  try {
+    return await putWithProgress(url, body, headers, onProgress, timeoutMs);
+  } catch (xhrErr) {
+    const message = errorMessage(xhrErr);
+    if (!/网络失败|network|failed to fetch/i.test(message)) throw xhrErr;
+    setProgress("XHR 上传失败，正在使用 fetch 重试", null);
+    try {
+      const resp = await fetchWithTimeout(url, {
+        method: "PUT",
+        headers,
+        body,
+      }, timeoutMs);
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => "");
+        throw new Error(`HTTP ${resp.status} ${text.slice(0, 160)}`);
+      }
+      return {
+        etag: resp.headers.get("ETag") || resp.headers.get("etag") || "",
+      };
+    } catch (fetchErr) {
+      let host = "";
+      try {
+        host = new URL(url).host;
+      } catch {
+        host = "unknown-host";
+      }
+      const contentType = headers?.["Content-Type"] || headers?.["content-type"] || "-";
+      throw new Error(
+        `文件上传网络失败：无法 PUT 到 ${host}。XHR：${message}；fetch：${errorMessage(fetchErr)}。Content-Type=${contentType}。这通常是浏览器到 R2 的网络/CORS/代理问题，不是 upload_init 失败。`,
+      );
+    }
+  }
+}
+
 function putWithProgress(url, body, headers, onProgress, timeoutMs = 10 * 60 * 1000) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
@@ -1263,7 +1411,13 @@ function putWithProgress(url, body, headers, onProgress, timeoutMs = 10 * 60 * 1
     };
     xhr.onerror = () => {
       window.clearTimeout(timer);
-      reject(new Error("文件上传网络失败"));
+      let host = "";
+      try {
+        host = new URL(url).host;
+      } catch {
+        host = "unknown-host";
+      }
+      reject(new Error(`文件上传网络失败：PUT ${host}，status=${xhr.status || 0}，readyState=${xhr.readyState}`));
     };
     xhr.onabort = () => {
       window.clearTimeout(timer);
@@ -1304,6 +1458,11 @@ async function fetchWithTimeout(url, options, timeoutMs) {
 }
 
 async function readTextFile(runtime, path) {
+  if (localFileStore.has(path)) {
+    const item = localFileStore.get(path);
+    if (typeof item.text === "string") return item.text;
+    if (item.bytes) return new TextDecoder().decode(item.bytes);
+  }
   const link = await runtime.files.download_url({ path });
   const url = link.get_url || link.url || link.download_url;
   if (!url) throw new Error(`files.download_url 未返回可读取链接，返回字段：${Object.keys(link || {}).join(", ")}`);
@@ -1314,6 +1473,10 @@ async function readTextFile(runtime, path) {
 
 async function deleteFileQuietly(runtime, path) {
   if (!path) return;
+  if (localFileStore.has(path)) {
+    localFileStore.delete(path);
+    return;
+  }
   try {
     await runtime.files.delete({ path });
   } catch {
@@ -1321,13 +1484,35 @@ async function deleteFileQuietly(runtime, path) {
   }
 }
 
-async function invokeExtractor(runtime, args) {
+async function downloadLocalFile(path, filename) {
+  const item = localFileStore.get(path);
+  if (!item) return;
+  const blob = item.file instanceof Blob
+    ? item.file
+    : item.text != null
+      ? new Blob([item.text], { type: item.contentType || TEXT_UPLOAD_TYPE })
+      : new Blob([item.bytes || new Uint8Array()], { type: item.contentType || "application/octet-stream" });
+  const url = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename || item.filename || basename(path) || "download";
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } finally {
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+}
+
+async function invokeExtractor(runtime, args, method = EXECUTA_METHOD) {
   let lastError = null;
   for (const toolId of EXECUTA_TOOL_IDS) {
     try {
       const reply = await runtime.tools.invoke({
         tool_id: toolId,
-        method: EXECUTA_METHOD,
+        method,
         args,
         timeoutMs: TOOL_HOST_TIMEOUT_MS,
       }, { timeoutMs: TOOL_CLIENT_TIMEOUT_MS });
@@ -1361,14 +1546,110 @@ function emptyExtractionMessage(extraction) {
   return `未抽取到可分析文本，请检查文档是否为扫描件或图片型 PDF。${ocrHint}${warningText}`;
 }
 
+function archiveScanSummary(listing) {
+  const entries = Array.isArray(listing.entries) ? listing.entries : [];
+  const skipped = Array.isArray(listing.skipped) ? listing.skipped : [];
+  const lines = [
+    `压缩包扫描完成：找到 ${entries.length} 个可抽取文件，跳过 ${listing.skipped_count || skipped.length || 0} 个文件。`,
+    "",
+    "可抽取文件：",
+    ...(entries.length
+      ? entries.slice(0, 80).map((entry, index) => `${index + 1}. ${entry.path || entry.filename || "-"}（${entry.kind || "-"}，${formatBytes(entry.size_bytes || 0)}）`)
+      : ["- 未找到可抽取文件"]),
+  ];
+  if (entries.length > 80) lines.push(`... 还有 ${entries.length - 80} 个文件未显示`);
+  if (skipped.length) {
+    lines.push("", `跳过文件（前 ${skipped.length} 条）：`);
+    lines.push(...skipped.map((item) => `- ${item.path || "-"}：${item.reason || "已跳过"}`));
+    if ((listing.skipped_count || skipped.length) > skipped.length) {
+      lines.push(`... 还有 ${(listing.skipped_count || skipped.length) - skipped.length} 个跳过文件未显示`);
+    }
+  }
+  return lines.join("\n");
+}
+
 async function sourceArgs(runtime, source) {
   if (!source.storagePath) return source.args || {};
+  if (localFileStore.has(source.storagePath)) {
+    const item = localFileStore.get(source.storagePath);
+    if (item.size && item.size > INLINE_CAP_BYTES) {
+      throw new Error(`本地 legacy 模式只支持 8MB 以内的文件内联传输：${basename(source.storagePath)}`);
+    }
+    if (item.file instanceof Blob) return { bytes_b64: await readBlobAsBase64(item.file) };
+    if (item.bytes) return { bytes_b64: btoa(String.fromCharCode(...item.bytes)) };
+    if (typeof item.text === "string") {
+      return { bytes_b64: await readBlobAsBase64(new Blob([item.text], { type: item.contentType || TEXT_UPLOAD_TYPE })) };
+    }
+  }
   const link = await runtime.files.download_url({ path: source.storagePath });
   const downloadUrl = link.get_url || link.url || link.download_url;
   if (!downloadUrl) {
     throw new Error(`files.download_url 未返回 get_url/url，返回字段：${Object.keys(link || {}).join(", ")}`);
   }
   return { download_url: downloadUrl };
+}
+
+async function importLocalArchiveToExtractorCache(runtime, file) {
+  const uploadId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  let offset = 0;
+  let lastReply = null;
+  let chunkBytes = ARCHIVE_IMPORT_CHUNK_BYTES;
+  while (offset < file.size) {
+    let success = false;
+    let attemptChunkBytes = chunkBytes;
+    let lastErr = null;
+    while (!success) {
+      const end = Math.min(file.size, offset + attemptChunkBytes);
+      const chunk = file.slice(offset, end);
+      const chunkB64 = await readBlobAsBase64(chunk);
+      const done = end >= file.size;
+      setProgress(
+        `正在导入本地压缩包缓存 ${formatBytes(end)} / ${formatBytes(file.size)}（块 ${formatBytes(attemptChunkBytes)}）`,
+        file.size ? (end / file.size) * 100 : null,
+      );
+      try {
+        lastReply = await invokeExtractor(runtime, {
+          filename: file.name,
+          upload_id: uploadId,
+          chunk_b64: chunkB64,
+          offset,
+          total_size: file.size,
+          done,
+        }, EXECUTA_IMPORT_ARCHIVE_CHUNK_METHOD);
+        offset = end;
+        chunkBytes = Math.min(ARCHIVE_IMPORT_CHUNK_BYTES, Math.max(attemptChunkBytes, ARCHIVE_IMPORT_MIN_CHUNK_BYTES));
+        success = true;
+      } catch (err) {
+        lastErr = err;
+        if (!/Failed to fetch|transport/i.test(errorMessage(err)) || attemptChunkBytes <= ARCHIVE_IMPORT_MIN_CHUNK_BYTES) {
+          throw err;
+        }
+        attemptChunkBytes = Math.max(ARCHIVE_IMPORT_MIN_CHUNK_BYTES, Math.floor(attemptChunkBytes / 4));
+        setProgress(`导入块失败，正在缩小到 ${formatBytes(attemptChunkBytes)} 重试`, file.size ? (offset / file.size) * 100 : null);
+        await wait(200);
+      }
+    }
+  }
+  const archiveCacheId = lastReply?.archive_cache_id;
+  if (!archiveCacheId) {
+    throw new Error(`本地压缩包导入未返回 archive_cache_id，返回字段：${Object.keys(lastReply || {}).join(", ")}`);
+  }
+  return { archive_cache_id: archiveCacheId };
+}
+
+async function archiveSourceArgs(runtime, file, source) {
+  if (source?.storagePath && localFileStore.has(source.storagePath)) {
+    const item = localFileStore.get(source.storagePath);
+    if (item?.transient || file.size > INLINE_CAP_BYTES) {
+      if (item?.uploadError) {
+        setReportPlain(`R2 源文件归档失败，已进入本地临时抽取模式。\n\n原始上传错误：${item.uploadError}`);
+      }
+      const localPath = localDevDownloadsPath(file);
+      if (localPath) return { local_path: localPath };
+      return importLocalArchiveToExtractorCache(runtime, file);
+    }
+  }
+  return sourceArgs(runtime, source);
 }
 
 function storedSource(contentType, storagePath) {
@@ -1383,6 +1664,9 @@ async function inlineSource(file, contentType) {
 }
 
 async function extractStoredDocument(runtime, file, source, processPageLimit = selectedProcessPages()) {
+  if (isArchiveName(file.name)) {
+    return extractArchiveInEntries(runtime, file, source, processPageLimit);
+  }
   if (fileExt(file.name) === "pdf") {
     return extractPdfInBatches(runtime, file, source, processPageLimit);
   }
@@ -1395,9 +1679,165 @@ async function extractStoredDocument(runtime, file, source, processPageLimit = s
   });
 }
 
-async function extractPdfInBatches(runtime, file, source, processPageLimit) {
+async function extractArchiveInEntries(runtime, file, source, processPageLimit) {
+  setProgress("正在扫描压缩包", null);
+  setReportPlain("正在扫描压缩包内的可审查文件。");
+  let archiveArgs = await archiveSourceArgs(runtime, file, source);
+  let listing;
+  try {
+    listing = await invokeExtractor(runtime, {
+      filename: file.name,
+      mime_type: source.contentType,
+      ...archiveArgs,
+      max_files: MAX_ARCHIVE_FILES,
+      max_depth: MAX_ARCHIVE_DEPTH,
+      max_uncompressed_bytes: MAX_ARCHIVE_UNCOMPRESSED_BYTES,
+    }, EXECUTA_LIST_ARCHIVE_METHOD);
+  } catch (err) {
+    if (!archiveArgs.local_path) throw err;
+    setProgress("本地路径读取失败，正在改用分块导入压缩包", null);
+    archiveArgs = await importLocalArchiveToExtractorCache(runtime, file);
+    listing = await invokeExtractor(runtime, {
+      filename: file.name,
+      mime_type: source.contentType,
+      ...archiveArgs,
+      max_files: MAX_ARCHIVE_FILES,
+      max_depth: MAX_ARCHIVE_DEPTH,
+      max_uncompressed_bytes: MAX_ARCHIVE_UNCOMPRESSED_BYTES,
+    }, EXECUTA_LIST_ARCHIVE_METHOD);
+  }
+
+  const entries = Array.isArray(listing.entries) ? listing.entries : [];
+  const skipped = Array.isArray(listing.skipped) ? listing.skipped : [];
+  const warnings = Array.isArray(listing.warnings) ? [...listing.warnings] : [];
+  setProgress(`压缩包扫描完成：${entries.length} 个可抽取文件，跳过 ${listing.skipped_count || skipped.length || 0} 个`, null);
+  setReportPlain(archiveScanSummary(listing));
+  const chunks = [];
+  const extractedEntries = [];
+  const archiveCacheId = listing.archive_cache_id || "";
+  const archiveEntryArgs = archiveCacheId ? { archive_cache_id: archiveCacheId } : archiveArgs;
+  let totalChars = 0;
+  let processedFiles = 0;
+  let totalPages = 0;
+  let processedPages = 0;
+  let ocrUsed = false;
+  let ocrPageCount = 0;
+  let ocrLang = "";
+  let truncated = Boolean(listing.truncated);
+
+  if (!entries.length) {
+    warnings.push("压缩包内没有找到可抽取的 PDF/DOCX/XLSX/CSV/TXT/MD 文件");
+  }
+
+  for (let index = 0; index < entries.length && totalChars < MAX_EXTRACT_CHARS; index += 1) {
+    const entry = entries[index];
+    const entryLabel = entry.path || entry.filename || `文件 ${index + 1}`;
+    const percent = entries.length ? (index / entries.length) * 100 : null;
+    setProgress(`正在抽取第 ${index + 1}/${entries.length} 个文件：${entryLabel}`, percent);
+    setReportPlain(`正在抽取压缩包文件：${entryLabel}`);
+
+    const remainingChars = Math.max(1000, MAX_EXTRACT_CHARS - totalChars);
+    let result;
+    try {
+      if (entry.kind === "pdf") {
+        result = await extractPdfInBatches(
+          runtime,
+          file,
+          source,
+          processPageLimit,
+          EXECUTA_METHOD,
+          { entry_id: entry.entry_id, ...archiveEntryArgs },
+          {
+            displayName: entryLabel,
+            progressPrefix: `正在抽取第 ${index + 1}/${entries.length} 个文件：`,
+            deferFinish: true,
+            maxCharsBudget: remainingChars,
+          },
+        );
+      } else {
+        result = await invokeExtractor(runtime, {
+          filename: file.name,
+          mime_type: source.contentType,
+          ...archiveEntryArgs,
+          entry_id: entry.entry_id,
+          max_chars: remainingChars,
+        }, EXECUTA_METHOD);
+      }
+    } catch (err) {
+      warnings.push(`${entryLabel} 抽取失败，已跳过：${errorMessage(err)}`);
+      continue;
+    }
+
+    processedFiles += 1;
+    const text = result.text || "";
+    const section = text ? `### 文件：${entryLabel}\n\n${text}` : "";
+    if (section) {
+      chunks.push(section);
+      totalChars += section.length;
+    }
+    if (Array.isArray(result.warnings)) {
+      warnings.push(...result.warnings.map((warning) => `${entryLabel}：${warning}`));
+    }
+    totalPages += Number(result.page_count || 0);
+    processedPages += Number(result.processed_page_count || 0);
+    ocrUsed = ocrUsed || Boolean(result.ocr_used);
+    ocrPageCount += Number(result.ocr_page_count || 0);
+    ocrLang = result.ocr_lang || ocrLang;
+    truncated = truncated || Boolean(result.truncated);
+    extractedEntries.push({
+      path: entryLabel,
+      kind: result.kind || entry.kind,
+      size_bytes: entry.size_bytes || result.size_bytes || null,
+      char_count: text.length,
+      page_count: result.page_count || null,
+      processed_page_count: result.processed_page_count || null,
+    });
+
+    setProgress(`已抽取 ${processedFiles} / ${entries.length} 个文件`, ((index + 1) / entries.length) * 100);
+  }
+
+  if (totalChars >= MAX_EXTRACT_CHARS) {
+    warnings.push(`抽取文本已达到 ${MAX_EXTRACT_CHARS} 字符上限，压缩包剩余文件未继续抽取`);
+    truncated = true;
+  }
+  const skippedTotal = listing.skipped_count || skipped.length;
+  if (skippedTotal) {
+    const preview = skipped
+      .slice(0, 30)
+      .map((item) => `${item.path || "-"}（${item.reason || "已跳过"}）`)
+      .join("；");
+    warnings.push(`压缩包内 ${skippedTotal} 个文件未参与抽取：${preview}${skippedTotal > 30 ? "；..." : ""}`);
+  }
+
+  finishProgress(`压缩包抽取完成：${processedFiles} / ${entries.length} 个文件`);
+  const text = chunks.join("\n\n");
+  return {
+    kind: "archive",
+    archive_kind: listing.archive_kind || archiveKind(file.name),
+    filename: file.name,
+    mime_type: source.contentType,
+    size_bytes: file.size,
+    text,
+    char_count: text.length,
+    file_count: entries.length,
+    processed_file_count: processedFiles,
+    entries: extractedEntries,
+    skipped,
+    page_count: totalPages || null,
+    processed_page_count: processedPages || processedFiles,
+    truncated,
+    ocr_used: ocrUsed,
+    ocr_page_count: ocrPageCount,
+    ocr_lang: ocrLang,
+    warnings,
+  };
+}
+
+async function extractPdfInBatches(runtime, file, source, processPageLimit, method = EXECUTA_METHOD, extraArgs = {}, options = {}) {
   const requestedPages = Math.min(Math.max(1, Number(processPageLimit) || 100), MAX_PROCESS_PAGES);
   const initialBatchSize = activeWorkstream === "interpret" ? INTERPRET_PAGES_PER_TOOL_CALL : PAGES_PER_TOOL_CALL;
+  const displayName = options.displayName || file.name;
+  const maxCharsBudget = Math.max(1000, Number(options.maxCharsBudget || MAX_EXTRACT_CHARS));
   const chunks = [];
   const warnings = [];
   const warningSet = new Set();
@@ -1418,7 +1858,7 @@ async function extractPdfInBatches(runtime, file, source, processPageLimit) {
     }
   };
 
-  while (nextPage && processedPages < requestedPages && totalChars < MAX_EXTRACT_CHARS) {
+  while (nextPage && processedPages < requestedPages && totalChars < maxCharsBudget) {
     const effectiveTotal = Math.min(requestedPages, totalPages || requestedPages);
     const batchPages = Math.min(currentBatchSize, effectiveTotal - processedPages);
     if (batchPages <= 0) break;
@@ -1427,8 +1867,13 @@ async function extractPdfInBatches(runtime, file, source, processPageLimit) {
     const beforePercent = totalPages
       ? ((nextPage - 1) / Math.min(requestedPages, totalPages)) * 100
       : null;
-    setProgress(`正在抽取第 ${nextPage}-${endLabel} 页`, beforePercent);
-    setReportPlain(`正在抽取文档文本：第 ${nextPage}-${endLabel} 页。`);
+    setProgress(
+      options.progressPrefix
+        ? `${options.progressPrefix}${displayName} 第 ${nextPage}-${endLabel} 页`
+        : `正在抽取第 ${nextPage}-${endLabel} 页`,
+      beforePercent,
+    );
+    setReportPlain(`正在抽取文档文本：${displayName} 第 ${nextPage}-${endLabel} 页。`);
 
     let result;
     try {
@@ -1436,12 +1881,13 @@ async function extractPdfInBatches(runtime, file, source, processPageLimit) {
         filename: file.name,
         mime_type: source.contentType,
         ...(await sourceArgs(runtime, source)),
-        max_chars: Math.max(1000, MAX_EXTRACT_CHARS - totalChars),
+        ...extraArgs,
+        max_chars: Math.max(1000, maxCharsBudget - totalChars),
         max_ocr_pages: batchPages,
         ocr_dpi: OCR_DPI,
         page_start: nextPage,
         page_count: batchPages,
-      });
+      }, method);
     } catch (err) {
       if (isRecoverableExtractorError(err) && batchPages > MIN_PAGES_PER_TOOL_CALL) {
         currentBatchSize = Math.max(MIN_PAGES_PER_TOOL_CALL, Math.floor(batchPages / 2));
@@ -1485,12 +1931,14 @@ async function extractPdfInBatches(runtime, file, source, processPageLimit) {
     processedPages = Math.max(processedPages, (Number(result.page_start || nextPage) - 1) + attempted);
     const cappedTotal = Math.min(requestedPages, totalPages || requestedPages);
     setProgress(
-      `已处理 ${Math.min(processedPages, cappedTotal)} / ${cappedTotal} 页`,
+      options.progressPrefix
+        ? `${displayName} 已处理 ${Math.min(processedPages, cappedTotal)} / ${cappedTotal} 页`
+        : `已处理 ${Math.min(processedPages, cappedTotal)} / ${cappedTotal} 页`,
       (Math.min(processedPages, cappedTotal) / cappedTotal) * 100,
     );
 
-    if (totalChars >= MAX_EXTRACT_CHARS) {
-      addWarning(`抽取文本已达到 ${MAX_EXTRACT_CHARS} 字符上限，提前进入 LLM 分析`);
+    if (totalChars >= maxCharsBudget) {
+      addWarning(`抽取文本已达到 ${maxCharsBudget} 字符上限，提前进入 LLM 分析`);
       truncated = true;
       break;
     }
@@ -1503,10 +1951,12 @@ async function extractPdfInBatches(runtime, file, source, processPageLimit) {
     addWarning(`PDF 共 ${totalPages} 页，本次按设置处理前 ${requestedPages} 页`);
   }
 
-  finishProgress(`文本抽取完成：${Math.min(processedPages, targetPages)} / ${targetPages} 页`);
+  if (!options.deferFinish) {
+    finishProgress(`文本抽取完成：${Math.min(processedPages, targetPages)} / ${targetPages} 页`);
+  }
   return {
     kind: "pdf",
-    filename: file.name,
+    filename: displayName,
     mime_type: source.contentType,
     size_bytes: sizeBytes,
     page_count: totalPages || processedPages,
@@ -2253,8 +2703,10 @@ async function runAnalysis() {
     els.text.textContent = [
       `文件：${extraction.filename || selectedFile.name}`,
       `类型：${extraction.kind || fileExt(selectedFile.name)}`,
+      extraction.kind === "archive" ? `压缩包文件：已抽取 ${extraction.processed_file_count || 0} / ${extraction.file_count || 0} 个` : "",
       `页数/段落：${extraction.page_count ?? extraction.paragraph_count ?? extraction.line_count ?? "-"}`,
       extraction.ocr_used ? `OCR：已启用，识别 ${extraction.ocr_page_count || 0} 页，语言 ${extraction.ocr_lang || "-"}` : "",
+      extraction.entries?.length ? `参与文件：${extraction.entries.map((entry) => entry.path).join("；")}` : "",
       knowledgeRefs.length ? `知识库：${knowledgeRefs.map((k) => k.title).join("；")}` : "知识库：未使用公司知识库",
       warnings.length ? `提示：${warnings.join("；")}` : "",
       "",
@@ -2289,8 +2741,19 @@ async function runAnalysis() {
       extractedTextPath,
       reportPath,
       status: "已完成",
-      processedPages: extraction.processed_page_count || extraction.page_count || null,
-      pageCount: extraction.page_count || null,
+      processedPages: extraction.kind === "archive"
+        ? extraction.processed_file_count || null
+        : extraction.processed_page_count || extraction.page_count || null,
+      pageCount: extraction.kind === "archive" ? extraction.file_count || null : extraction.page_count || null,
+      sourceArchive: extraction.kind === "archive"
+        ? {
+            kind: extraction.archive_kind || archiveKind(selectedFile.name),
+            fileCount: extraction.file_count || 0,
+            processedFileCount: extraction.processed_file_count || 0,
+            entries: extraction.entries || [],
+            skipped: extraction.skipped || [],
+          }
+        : null,
       knowledgeRefs: knowledgeRefs.map((k) => ({ id: k.id, title: k.title, score: k.score })),
       params: {
         level: project.level,
@@ -2409,8 +2872,19 @@ async function runInterpretation() {
       },
       evidenceIndexCache: evidenceIndex,
       status: "已完成",
-      processedPages: extraction.processed_page_count || extraction.page_count || null,
-      pageCount: extraction.page_count || null,
+      processedPages: extraction.kind === "archive"
+        ? extraction.processed_file_count || null
+        : extraction.processed_page_count || extraction.page_count || null,
+      pageCount: extraction.kind === "archive" ? extraction.file_count || null : extraction.page_count || null,
+      sourceArchive: extraction.kind === "archive"
+        ? {
+            kind: extraction.archive_kind || archiveKind(file.name),
+            fileCount: extraction.file_count || 0,
+            processedFileCount: extraction.processed_file_count || 0,
+            entries: extraction.entries || [],
+            skipped: extraction.skipped || [],
+          }
+        : null,
       charCount: text.length,
       knowledgeRefs: knowledgeRefs.map((k) => ({ id: k.id, title: k.title, score: k.score })),
       appSessionUuid: "",
@@ -2447,7 +2921,7 @@ async function runInterpretation() {
 
     selectedInterpretFile = null;
     els.interpretFileInput.value = "";
-    els.interpretFileMeta.textContent = "PDF / DOCX / TXT / MD，最大 200 MB";
+    els.interpretFileMeta.textContent = REVIEW_SOURCE_LABEL;
     renderInterpretList();
     renderInterpretWorkspace();
   } catch (err) {
@@ -2611,6 +3085,10 @@ async function downloadRecord(id = selectedRecordId) {
   const runtime = await annaReady;
   const record = appState.reviews.find((r) => r.id === id);
   if (!record?.reportPath) return;
+  if (localFileStore.has(record.reportPath)) {
+    await downloadLocalFile(record.reportPath, `${sanitizeFilename(record.title)}.md`);
+    return;
+  }
   await runtime.files.download({
     path: record.reportPath,
     filename: `${sanitizeFilename(record.title)}.md`,
@@ -2621,6 +3099,10 @@ async function downloadSourceFile(id = selectedRecordId) {
   const runtime = await annaReady;
   const record = appState.reviews.find((r) => r.id === id);
   if (!record?.sourceFilePath) return;
+  if (localFileStore.has(record.sourceFilePath)) {
+    await downloadLocalFile(record.sourceFilePath, sanitizeFilename(record.sourceFilename || basename(record.sourceFilePath) || record.title || "source-document"));
+    return;
+  }
   await runtime.files.download({
     path: record.sourceFilePath,
     filename: sanitizeFilename(record.sourceFilename || basename(record.sourceFilePath) || record.title || "source-document"),
@@ -2668,6 +3150,10 @@ async function downloadInterpretReport(id = selectedInterpretId) {
   const runtime = await annaReady;
   const record = appState.interprets.find((r) => r.id === id);
   if (!record?.analysisPath) return;
+  if (localFileStore.has(record.analysisPath)) {
+    await downloadLocalFile(record.analysisPath, `${sanitizeFilename(record.title)}.md`);
+    return;
+  }
   await runtime.files.download({
     path: record.analysisPath,
     filename: `${sanitizeFilename(record.title)}.md`,
@@ -2678,6 +3164,10 @@ async function downloadInterpretSourceFile(id = selectedInterpretId) {
   const runtime = await annaReady;
   const record = appState.interprets.find((r) => r.id === id);
   if (!record?.sourceFilePath) return;
+  if (localFileStore.has(record.sourceFilePath)) {
+    await downloadLocalFile(record.sourceFilePath, sanitizeFilename(record.sourceFilename || basename(record.sourceFilePath) || record.title || "interpret-source"));
+    return;
+  }
   await runtime.files.download({
     path: record.sourceFilePath,
     filename: sanitizeFilename(record.sourceFilename || basename(record.sourceFilePath) || record.title || "interpret-source"),
@@ -2972,6 +3462,15 @@ function errorMessage(err) {
   return err?.message || err?.error?.message || String(err);
 }
 
+function isNotImplementedError(err) {
+  return /not_implemented|endpoint not yet available/i.test(errorMessage(err));
+}
+
+function isLocalDevOrigin() {
+  const host = window.location.hostname;
+  return host === "localhost" || host === "127.0.0.1" || host === "::1";
+}
+
 function isRecoverableExtractorError(err) {
   return /executa process exited|tool_timeout|failed to fetch|stream has ended|eof/i.test(errorMessage(err));
 }
@@ -2988,8 +3487,12 @@ function sanitizeFilename(name) {
 
 function guessMime(name) {
   const ext = fileExt(name);
+  if (archiveKind(name) === "zip") return "application/zip";
+  if (archiveKind(name) === "tar.gz") return "application/gzip";
   if (ext === "pdf") return "application/pdf";
   if (ext === "docx") return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  if (ext === "xlsx") return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  if (ext === "csv") return "text/csv; charset=utf-8";
   if (ext === "md" || ext === "markdown") return "text/markdown; charset=utf-8";
   if (ext === "txt") return TEXT_UPLOAD_TYPE;
   return "application/octet-stream";
