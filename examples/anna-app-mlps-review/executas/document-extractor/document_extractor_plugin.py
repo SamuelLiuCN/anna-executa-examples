@@ -859,6 +859,11 @@ def _skip_reason(name: str, size_bytes: int, is_dir: bool = False, unsafe: bool 
     return "不支持的文件类型"
 
 
+def _is_silent_archive_metadata(name: str) -> bool:
+    safe = _safe_archive_path(name)
+    return safe == "__MACOSX" or safe.startswith("__MACOSX/")
+
+
 def _zip_display_name(info: zipfile.ZipInfo) -> str:
     if info.flag_bits & 0x800:
         return info.filename
@@ -930,6 +935,8 @@ def _list_archive_source(
     def consider_file(name: str, size_bytes: int, read_bytes: Any, unsafe: bool = False, display_name: str = "") -> None:
         safe_name = _safe_archive_path(name)
         safe_display_name = _safe_archive_path(display_name or name) or safe_name
+        if _is_silent_archive_metadata(safe_name) or _is_silent_archive_metadata(safe_display_name):
+            return
         display_path = f"{prefix}/{safe_display_name}" if prefix and safe_display_name else safe_display_name
         reason = _skip_reason(name, size_bytes, False, unsafe)
         if reason:

@@ -1980,7 +1980,238 @@ function buildKnowledgeContext(refs) {
     .join("\n\n");
 }
 
-function buildPrompt(extraction, knowledgeRefs, textOverride = "", scope = "全文") {
+function normalizeSourceLabel(label) {
+  return String(label || "").replace(/^### 文件：\s*/, "").trim();
+}
+
+function formatPageRange(pageStart, pageEnd) {
+  const start = Number(pageStart);
+  const end = Number(pageEnd);
+  if (!Number.isFinite(start) || start <= 0) return "";
+  if (Number.isFinite(end) && end > 0 && end !== start) return ` 第 ${start}-${end} 页`;
+  return ` 第 ${start} 页`;
+}
+
+function sourceRefLabel(ref) {
+  const base = normalizeSourceLabel(ref?.file || ref?.label || "");
+  const page = formatPageRange(ref?.pageStart, ref?.pageEnd);
+  const part = Number(ref?.partCount) > 1 ? `（片段 ${ref.partIndex}/${ref.partCount}）` : "";
+  return `${base || "未知来源"}${page}${part}`;
+}
+
+function mergeSourceRefs(refs) {
+  const merged = [];
+  for (const ref of refs || []) {
+    const pageStart = Number(ref.pageStart);
+    const pageEnd = Number(ref.pageEnd);
+    const partIndex = Number(ref.partIndex);
+    const partCount = Number(ref.partCount);
+    const normalized = {
+      file: normalizeSourceLabel(ref.file || ref.label || ""),
+      pageStart: Number.isFinite(pageStart) && pageStart > 0 ? pageStart : null,
+      pageEnd: Number.isFinite(pageEnd) && pageEnd > 0 ? pageEnd : null,
+      partIndex: Number.isFinite(partIndex) && partIndex > 0 ? partIndex : 1,
+      partCount: Number.isFinite(partCount) && partCount > 0 ? partCount : 1,
+      kind: ref.kind || "",
+    };
+    const last = merged[merged.length - 1];
+    const canMergePages =
+      last &&
+      last.file === normalized.file &&
+      last.pageStart != null &&
+      normalized.pageStart != null &&
+      last.pageEnd != null &&
+      normalized.pageEnd != null &&
+      normalized.pageStart <= last.pageEnd + 1;
+    const canMergeFileOnly =
+      last &&
+      last.file === normalized.file &&
+      last.pageStart == null &&
+      normalized.pageStart == null &&
+      last.pageEnd == null &&
+      normalized.pageEnd == null;
+    if (canMergePages) {
+      last.pageEnd = Math.max(last.pageEnd, normalized.pageEnd);
+      continue;
+    }
+    if (canMergeFileOnly) continue;
+    merged.push(normalized);
+  }
+  return merged;
+}
+
+function summarizeSourceRefs(refs, limit = 6) {
+  const merged = mergeSourceRefs(refs);
+  if (!merged.length) return "未提供来源信息";
+  const labels = merged.slice(0, limit).map((ref) => sourceRefLabel(ref));
+  if (merged.length > limit) labels.push("...");
+  return labels.join("、");
+}
+
+function splitText(text, maxChars) {
+  const value = String(text || "").trim();
+  if (!value) return [];
+  if (value.length <= maxChars) return [value];
+  const paragraphs = value.split(/\n{2,}/);
+  if (paragraphs.length <= 1) {
+    const chunks = [];
+    let offset = 0;
+    while (offset < value.length) {
+      let end = Math.min(value.length, offset + maxChars);
+      if (end < value.length) {
+        const newline = value.lastIndexOf("\n", end);
+        const sentence = Math.max(
+          value.lastIndexOf("。", end),
+          value.lastIndexOf("；", end),
+          value.lastIndexOf(";", end),
+        );
+        const boundary = Math.max(newline, sentence);
+        if (boundary > offset + maxChars * 0.55) end = boundary + 1;
+      }
+      const piece = value.slice(offset, end).trim();
+      if (piece) chunks.push(piece);
+      offset = end;
+    }
+    return chunks.filter(Boolean);
+  }
+  const chunks = [];
+  let current = "";
+  for (const paragraph of paragraphs) {
+    const piece = paragraph.trim();
+    if (!piece) continue;
+    const candidate = current ? `${current}\n\n${piece}` : piece;
+    if (candidate.length > maxChars && current) {
+      chunks.push(current);
+      current = piece;
+      continue;
+    }
+    if (candidate.length > maxChars) {
+      chunks.push(...splitText(piece, maxChars));
+      current = "";
+      continue;
+    }
+    current = candidate;
+  }
+  if (current) chunks.push(current);
+  return chunks.filter(Boolean);
+}
+
+function splitSectionByPageMarkers(sectionText, fileLabel) {
+  const lines = String(sectionText || "").replace(/\r\n?/g, "\n").split("\n");
+  const pageBlocks = [];
+  let currentPage = null;
+  let currentLines = [];
+  let sawPageMarker = false;
+  const flush = () => {
+    const text = currentLines.join("\n").trim();
+    if (!text) return;
+    pageBlocks.push({
+      text,
+      sourceRefs: [
+        {
+          file: fileLabel,
+          pageStart: currentPage,
+          pageEnd: currentPage,
+          kind: currentPage != null ? "page" : "file",
+        },
+      ],
+    });
+    currentLines = [];
+  };
+  for (const line of lines) {
+    const match = line.match(/^--- 第\s*(\d+)\s*页(?:（OCR）|\(OCR\))?---$/);
+    if (match) {
+      sawPageMarker = true;
+      if (currentLines.length && currentPage == null) currentPage = Number(match[1]);
+      flush();
+      currentPage = Number(match[1]);
+      continue;
+    }
+    currentLines.push(line);
+  }
+  flush();
+  if (!sawPageMarker) {
+    const text = String(sectionText || "").trim();
+    return text ? [{ text, sourceRefs: [{ file: fileLabel, pageStart: null, pageEnd: null, kind: "file" }] }] : [];
+  }
+  return pageBlocks;
+}
+
+function splitReviewTextIntoStructuredBlocks(extraction) {
+  const text = String(extraction?.text || "").replace(/\r\n?/g, "\n").trim();
+  if (!text) return [];
+  const fallbackLabel = normalizeSourceLabel(extraction?.filename || selectedFile?.name || "文档");
+  const lines = text.split("\n");
+  const fileSections = [];
+  let currentLabel = fallbackLabel;
+  let currentLines = [];
+  let sawFileMarker = false;
+  const flush = () => {
+    const body = currentLines.join("\n").trim();
+    if (!body) return;
+    fileSections.push({ label: currentLabel, text: body });
+    currentLines = [];
+  };
+  for (const line of lines) {
+    const match = line.match(/^### 文件：\s*(.+)$/);
+    if (match) {
+      sawFileMarker = true;
+      flush();
+      currentLabel = normalizeSourceLabel(match[1]) || fallbackLabel;
+      continue;
+    }
+    currentLines.push(line);
+  }
+  flush();
+  const normalizedSections = sawFileMarker ? fileSections : [{ label: fallbackLabel, text }];
+  return normalizedSections.flatMap((section) => splitSectionByPageMarkers(section.text, section.label));
+}
+
+function packStructuredReviewChunks(blocks, maxChars = MAX_LLM_CHARS) {
+  const chunks = [];
+  let currentText = "";
+  let currentSourceRefs = [];
+  const flush = () => {
+    const text = currentText.trim();
+    if (!text) return;
+    chunks.push({
+      text,
+      sourceRefs: mergeSourceRefs(currentSourceRefs),
+    });
+    currentText = "";
+    currentSourceRefs = [];
+  };
+  for (const block of blocks) {
+    const pieces = splitText(block.text, maxChars);
+    const blockRefs = Array.isArray(block.sourceRefs) ? block.sourceRefs : [];
+    for (const [index, piece] of pieces.entries()) {
+      const partIndex = pieces.length > 1 ? index + 1 : 1;
+      const partCount = pieces.length || 1;
+      const pieceRefs = blockRefs.map((ref) => ({
+        ...ref,
+        partIndex,
+        partCount,
+      }));
+      const candidate = currentText ? `${currentText}\n\n${piece}` : piece;
+      if (currentText && candidate.length > maxChars) {
+        flush();
+      }
+      currentText = currentText ? `${currentText}\n\n${piece}` : piece;
+      currentSourceRefs.push(...pieceRefs);
+      if (currentText.length >= maxChars) flush();
+    }
+  }
+  flush();
+  return chunks;
+}
+
+function splitReviewTextIntoStructuredChunks(extraction) {
+  const blocks = splitReviewTextIntoStructuredBlocks(extraction);
+  if (!blocks.length) return [];
+  return packStructuredReviewChunks(blocks, MAX_LLM_CHARS);
+}
+
+function buildPrompt(extraction, knowledgeRefs, textOverride = "", scope = "全文", sourceRefs = []) {
   const text = textOverride || extraction.text || "";
   const knowledgeContext = buildKnowledgeContext(knowledgeRefs);
   const truncated =
@@ -1988,24 +2219,31 @@ function buildPrompt(extraction, knowledgeRefs, textOverride = "", scope = "全�
       ? `${text.slice(0, MAX_LLM_CHARS)}\n\n[文本已截断：原始 ${text.length} 字符，仅分析前 ${MAX_LLM_CHARS} 字符]`
       : text;
   const project = currentProject();
-  return `请审查以下文档内容是否符合网络安全等级保护（等保 2.0）${project?.level || els.level.value}常见要求。
+  const sourceContext = summarizeSourceRefs(sourceRefs);
+  return `请依据 GB/T 28448-2019《信息安全技术 网络安全等级保护测评要求》与 GB/T 28449-2018《信息安全技术 网络安全等级保护测评过程指南》，审查以下等保资料是否充分、是否存在不符合项或证据缺口。
 
 公司：${currentCompany()?.name || "-"}
 项目：${project?.name || "-"}
 系统名称：${project?.systemName || "-"}
+保护等级：${project?.level || els.level.value}
 文档类型：${els.docKind.value}
 文件名：${selectedFile.name}
 分析范围：${scope}
+本段来源清单：${sourceContext}
 
-请使用中文输出，结构必须包含：
+请使用中文输出 Markdown，必须包含以下部分：
 1. 总体结论：符合 / 部分符合 / 不符合 / 证据不足。
-2. 风险等级：高 / 中 / 低，并说明理由。
-3. 按控制域列出检查结果，至少覆盖：安全物理环境、安全通信网络、安全区域边界、安全计算环境、安全管理中心、安全管理制度、安全管理机构、安全管理人员、安全建设管理、安全运维管理。
-4. 对不符合或证据不足的条目，给出可直接落地的修改建议。
-5. 引用上传审查文档中的具体依据，并单独标明公司知识库补充依据；没有依据时写“未在文档中发现”。
-6. 最后列出建议补充的佐证材料。
+2. 风险等级：高 / 中 / 低，并说明判定依据。
+3. 按控制域逐项检查，至少覆盖：安全物理环境、安全通信网络、安全区域边界、安全计算环境、安全管理中心、安全管理制度、安全管理机构、安全管理人员、安全建设管理、安全运维管理。
+4. 用表格列出本段发现：控制域、问题/缺口、风险等级、来源文件、页码或片段、证据摘要、整改建议、需补充材料。
+5. 明确区分三类依据：上传审查资料、公司知识库补充材料、模型推断；如无明确证据，一律写“证据不足”。
+6. 对不符合或证据不足的条目，给出可直接落地的修改建议，尽量写成制度条款、流程动作、配置要求或补充材料清单。
+7. 若上传资料与公司知识库存在冲突，单独列出冲突项。
 
-限制：不要声称这是正式测评结论；只基于上传审查文档和公司知识库补充材料判断。
+限制：
+- 不要声称这是正式测评结论。
+- 不要把“未发现证据”解释为“已满足”。
+- 不要遗漏来源文件名和页码/片段范围。
 
 公司知识库补充材料：
 ${knowledgeContext}
@@ -2015,60 +2253,60 @@ ${truncated}`;
 }
 
 function systemPrompt() {
-  return "你是资深网络安全等级保护（等保 2.0）文档审查顾问。依据 GB/T 22239-2019《信息安全技术 网络安全等级保护基本要求》的控制域进行文档充分性审查。你必须区分上传审查文档证据、公司知识库补充材料和推断，不能把缺失信息判定为已满足。";
+  return "你是网络安全等级保护测评文档审查顾问。请依据 GB/T 28448-2019《信息安全技术 网络安全等级保护测评要求》和 GB/T 28449-2018《信息安全技术 网络安全等级保护测评过程指南》进行资料充分性审查。你必须区分上传审查文档证据、公司知识库补充材料和模型推断；缺失证据时只能判定为证据不足，不能写成已满足。";
 }
 
-async function analyzeWithLlm(extraction, knowledgeRefs, textOverride = "", scope = "全文", maxTokens = 2400) {
+async function analyzeWithLlm(extraction, knowledgeRefs, textOverride = "", scope = "全文", sourceRefs = [], maxTokens = 2400) {
   const runtime = await annaReady;
   return runtime.llm.complete({
     systemPrompt: systemPrompt(),
     messages: [
-      { role: "user", content: { type: "text", text: buildPrompt(extraction, knowledgeRefs, textOverride, scope) } },
+      { role: "user", content: { type: "text", text: buildPrompt(extraction, knowledgeRefs, textOverride, scope, sourceRefs) } },
     ],
     maxTokens,
     temperature: 0.2,
   });
 }
 
-function splitText(text, maxChars) {
-  const chunks = [];
-  let offset = 0;
-  while (offset < text.length) {
-    let end = Math.min(text.length, offset + maxChars);
-    if (end < text.length) {
-      const boundary = text.lastIndexOf("\n--- 第 ", end);
-      if (boundary > offset + maxChars * 0.55) end = boundary;
-    }
-    chunks.push(text.slice(offset, end).trim());
-    offset = end;
-  }
-  return chunks.filter(Boolean);
-}
-
 async function analyzeDocumentWithLlm(extraction, knowledgeRefs) {
-  const text = extraction.text || "";
-  const chunks = splitText(text, MAX_LLM_CHARS);
+  const chunks = splitReviewTextIntoStructuredChunks(extraction);
   if (chunks.length <= 1) {
-    return analyzeWithLlm(extraction, knowledgeRefs, text, "全文", 2400);
+    return analyzeWithLlm(
+      extraction,
+      knowledgeRefs,
+      chunks[0]?.text || extraction.text || "",
+      "全文",
+      chunks[0]?.sourceRefs || [],
+      2600,
+    );
   }
 
   const partialReports = [];
   for (let index = 0; index < chunks.length; index += 1) {
-    setProgress(`LLM 分段分析 ${index + 1} / ${chunks.length}`, null);
-    setReportPlain(`正在请求 LLM 分析：第 ${index + 1} / ${chunks.length} 段。`);
+    const chunk = chunks[index];
+    const scope = `第 ${index + 1} / ${chunks.length} 段；来源：${summarizeSourceRefs(chunk.sourceRefs)}`;
+    setProgress(`LLM 分段分析 ${index + 1} / ${chunks.length}；${summarizeSourceRefs(chunk.sourceRefs)}`, null);
+    setReportPlain(`正在请求 LLM 分析：${scope}。`);
     const reply = await analyzeWithLlm(
       extraction,
       knowledgeRefs,
-      chunks[index],
-      `第 ${index + 1} / ${chunks.length} 段`,
-      1800,
+      chunk.text,
+      scope,
+      chunk.sourceRefs,
+      2000,
     );
-    partialReports.push(`--- 分段审查 ${index + 1} / ${chunks.length} ---\n${extractContent(reply)}`);
+    partialReports.push(`--- 分段审查 ${index + 1} / ${chunks.length} ---\n范围：${scope}\n${extractContent(reply)}`);
   }
 
   setProgress("LLM 正在汇总分段结论", null);
   const runtime = await annaReady;
   const project = currentProject();
+  const chunkMap = chunks
+    .map((chunk, index) => {
+      const scope = `第 ${index + 1} / ${chunks.length} 段；来源：${summarizeSourceRefs(chunk.sourceRefs)}`;
+      return `- ${scope}`;
+    })
+    .join("\n");
   return runtime.llm.complete({
     systemPrompt: systemPrompt(),
     messages: [
@@ -2083,6 +2321,7 @@ async function analyzeDocumentWithLlm(extraction, knowledgeRefs) {
 2. 合并重复问题，按风险高低排序。
 3. 明确哪些结论来自上传审查文档，哪些来自公司知识库补充材料，哪些属于证据不足。
 4. 不要声称这是正式测评结论。
+5. 保留并汇总每个问题的来源文件名、页码范围或片段范围；如为多文件综合判断，单独标记。
 
 公司：${currentCompany()?.name || "-"}
 项目：${project?.name || "-"}
@@ -2093,11 +2332,15 @@ async function analyzeDocumentWithLlm(extraction, knowledgeRefs) {
 使用知识库：${knowledgeRefs.map((k) => k.title).join("；") || "未使用公司知识库"}
 
 分段审查结果：
-${partialReports.join("\n\n")}`,
+
+${partialReports.join("\n\n")}
+
+分段来源映射：
+${chunkMap}`,
         },
       },
     ],
-    maxTokens: 3200,
+    maxTokens: 3800,
     temperature: 0.2,
   });
 }
