@@ -40,6 +40,10 @@ const MAX_ARCHIVE_FILES = 200;
 const MAX_ARCHIVE_DEPTH = 5;
 const MAX_ARCHIVE_UNCOMPRESSED_BYTES = 500 * 1024 * 1024;
 const MAX_LLM_CHARS = 90000;
+const REVIEW_REPORT_END_MARKER = "<!-- MLPS_REVIEW_REPORT_END -->";
+const REVIEW_MAX_RETRIES = 3;
+const REVIEW_FINAL_CONTEXT_CHARS = 70000;
+const REVIEW_FINDINGS_CONTEXT_CHARS = 52000;
 const MAX_KNOWLEDGE_ITEMS = 8;
 const MAX_KNOWLEDGE_CHARS = 40000;
 const MAX_INTERPRET_SYSTEM_PROMPT_CHARS = 3000;
@@ -160,6 +164,7 @@ let selectedInterpretId = null;
 let latestReport = "";
 let latestExtraction = null;
 let latestKnowledgeRefs = [];
+let activeReviewParams = null;
 let activeTab = "review";
 let modalState = { type: null, payload: null };
 let activeWorkstream = "review";
@@ -774,20 +779,56 @@ function renderRecordList() {
       .map((record) => `
         <tr>
           <td class="cell-strong">${escapeHtml(record.title)}</td>
-          <td><span class="status-chip">${escapeHtml(record.status || "-")}</span></td>
+          <td><span class="${reviewStatusClass(record)}">${escapeHtml(reviewStatusLabel(record))}</span></td>
           <td>${record.processedPages || 0}/${record.pageCount || "-"}</td>
           <td>${(record.knowledgeRefs || []).length} 条</td>
           <td>${formatDate(record.createdAt)}</td>
           <td>${rowActions([
             ["view-record", record.id, "查看", "ghost"],
+            ["rerun-record", record.id, "重新审查", "ghost", reviewIsRunning(record)],
             ["download-source", record.id, "下载源文件", "ghost"],
-            ["download-record", record.id, "下载报告", "ghost"],
+            ["download-record", record.id, "下载报告", "ghost", !reviewReportPath(record)],
             ["delete-record", record.id, "删除", "danger"],
           ])}</td>
         </tr>
       `)
       .join(""),
   );
+}
+
+function reviewStatusLabel(record) {
+  if (!record) return "-";
+  if (record.status) return record.status;
+  return record.reportComplete === false ? "失败" : "已完成";
+}
+
+function reviewStatusClass(record) {
+  const label = reviewStatusLabel(record);
+  const suffix =
+    label === "失败"
+      ? " error"
+      : label === "重试中"
+        ? " warning"
+        : label === "运行中"
+          ? " running"
+          : "";
+  return `status-chip${suffix}`;
+}
+
+function reviewIsRunning(record) {
+  return ["运行中", "重试中"].includes(reviewStatusLabel(record));
+}
+
+function reviewIsComplete(record) {
+  return reviewStatusLabel(record) === "已完成" && record?.reportComplete !== false;
+}
+
+function reviewReportPath(record) {
+  if (!record) return "";
+  if (record.reportComplete === false) {
+    return record.reportDraftAvailable ? record.reportDraftPath || "" : "";
+  }
+  return record.reportPath || (record.reportDraftAvailable ? record.reportDraftPath : "") || "";
 }
 
 function currentInterpret() {
@@ -912,8 +953,8 @@ function rowActions(actions) {
     <div class="table-actions">
       ${actions
         .map(
-          ([action, id, label, kind]) =>
-            `<button class="${kind || "ghost"} mini-action" type="button" data-action="${escapeHtml(action)}" data-id="${escapeHtml(id)}">${escapeHtml(label)}</button>`,
+          ([action, id, label, kind, disabled]) =>
+            `<button class="${kind || "ghost"} mini-action" type="button" data-action="${escapeHtml(action)}" data-id="${escapeHtml(id)}" ${disabled ? "disabled" : ""}>${escapeHtml(label)}</button>`,
         )
         .join("")}
     </div>
@@ -945,6 +986,22 @@ function archiveSummaryHtml(archive) {
     </dl>
     <pre class="output modal-output active">${escapeHtml(`参与文件：\n${entryText}\n\n跳过文件：\n${skippedText}${entries.length > 30 || skipped.length > 30 ? "\n\n（仅显示前 30 条）" : ""}`)}</pre>
   `;
+}
+
+function reviewNoticeHtml(record) {
+  if (!record) return "";
+  const messages = [];
+  if (reviewStatusLabel(record) === "失败" || record.reportComplete === false) {
+    messages.push("未形成完整审查报告，可查看已保留内容并手动重新审查。");
+  }
+  if (record.failureStage || record.failureReason) {
+    messages.push(`失败阶段：${record.failureStage || "-"}；原因：${record.failureReason || "-"}`);
+  }
+  if (record.extractionTruncated) {
+    messages.push("抽取内容达到页数、文件数或字符上限，报告仅覆盖已处理材料。");
+  }
+  if (!messages.length) return "";
+  return `<div class="modal-alert ${reviewStatusLabel(record) === "失败" ? "error" : "warning"}">${escapeHtml(messages.join("\n"))}</div>`;
 }
 
 function openModal(type, payload = {}) {
@@ -980,10 +1037,12 @@ function renderModal() {
       : payload.error
         ? `<div class="empty">${escapeHtml(payload.error)}</div>`
         : `
+          ${reviewNoticeHtml(record)}
           <dl class="meta-grid">
             <div><dt>标题</dt><dd>${escapeHtml(record.title)}</dd></div>
-            <div><dt>状态</dt><dd>${escapeHtml(record.status)}</dd></div>
+            <div><dt>状态</dt><dd>${escapeHtml(reviewStatusLabel(record))}</dd></div>
             <div><dt>时间</dt><dd>${escapeHtml(formatDate(record.createdAt))}</dd></div>
+            <div><dt>重试</dt><dd>${escapeHtml(`${record.retryCount || 0}/${record.maxRetries || REVIEW_MAX_RETRIES}`)}</dd></div>
             <div><dt>知识库引用</dt><dd>${escapeHtml((record.knowledgeRefs || []).map((k) => k.title).join("；") || "未使用公司知识库")}</dd></div>
           </dl>
           ${archiveSummaryHtml(record.sourceArchive)}
@@ -992,8 +1051,9 @@ function renderModal() {
         `;
     els.modalFooter.innerHTML = `
       <button class="ghost compact-action" type="button" data-modal-action="share-report" ${payload.report ? "" : "disabled"}>发送到对话继续整改</button>
+      <button class="ghost compact-action" type="button" data-modal-action="rerun-record" ${reviewIsRunning(record) ? "disabled" : ""}>重新审查</button>
       <button class="ghost compact-action" type="button" data-modal-action="download-source" ${record?.sourceFilePath ? "" : "disabled"}>下载源文件</button>
-      <button class="ghost compact-action" type="button" data-modal-action="download-record" ${record?.reportPath ? "" : "disabled"}>下载报告</button>
+      <button class="ghost compact-action" type="button" data-modal-action="download-record" ${reviewReportPath(record) ? "" : "disabled"}>下载报告</button>
       <button class="ghost compact-action" type="button" data-modal-action="close-modal">关闭</button>
     `;
     return;
@@ -1245,6 +1305,119 @@ function extractContent(reply) {
       .join("");
   }
   return typeof reply === "string" ? reply : JSON.stringify(reply, null, 2);
+}
+
+function llmFinishReason(reply) {
+  return (
+    reply?.finish_reason ||
+    reply?.finishReason ||
+    reply?.stop_reason ||
+    reply?.stopReason ||
+    reply?.choices?.[0]?.finish_reason ||
+    reply?.choices?.[0]?.finishReason ||
+    ""
+  );
+}
+
+function stripReportEndMarker(text) {
+  return String(text || "").replace(REVIEW_REPORT_END_MARKER, "").trim();
+}
+
+function reviewPromptContext() {
+  return {
+    docKind: activeReviewParams?.docKind || els.docKind.value,
+    filename: activeReviewParams?.filename || selectedFile?.name || "-",
+    maxPages: activeReviewParams?.maxPages || selectedProcessPages(),
+  };
+}
+
+function isLengthFinishReason(reason) {
+  return /length|max_tokens|token/i.test(String(reason || ""));
+}
+
+function isReviewReportComplete(report, reply = null) {
+  const value = String(report || "").trim();
+  const finishReason = llmFinishReason(reply);
+  if (!value) {
+    return { ok: false, reason: "报告为空", finishReason };
+  }
+  if (isLengthFinishReason(finishReason)) {
+    return { ok: false, reason: `LLM 因长度限制停止：${finishReason}`, finishReason };
+  }
+  if (!value.includes(REVIEW_REPORT_END_MARKER)) {
+    return { ok: false, reason: "缺少报告结束标记", finishReason };
+  }
+  const markerIndex = value.lastIndexOf(REVIEW_REPORT_END_MARKER);
+  if (value.slice(markerIndex + REVIEW_REPORT_END_MARKER.length).trim()) {
+    return { ok: false, reason: "结束标记后仍有额外内容", finishReason };
+  }
+  const visible = stripReportEndMarker(value);
+  const codeFenceCount = (visible.match(/```/g) || []).length;
+  if (codeFenceCount % 2 === 1) {
+    return { ok: false, reason: "Markdown 代码块未闭合", finishReason };
+  }
+  const tail = visible.slice(-160).trim();
+  if (/[`、，,：:（(【[]$/.test(tail) || /Segment\s+\d+\s*:\s*`?[^`\n]{0,80}$/i.test(tail)) {
+    return { ok: false, reason: "报告末尾疑似断在半截句子或来源路径中", finishReason };
+  }
+  return { ok: true, reason: "", finishReason };
+}
+
+function makeIncompleteReportError(validation, report, reply) {
+  const err = new Error(`LLM 报告未完整生成：${validation.reason || "未知原因"}`);
+  err.partialReport = stripReportEndMarker(report);
+  err.llmFinishReason = validation.finishReason || llmFinishReason(reply);
+  err.failureStage = "finalize";
+  return err;
+}
+
+async function completeLlmWithRetry(requestFactory, stageLabel, record = null, failureStage = "analyze") {
+  let lastErr = null;
+  for (let attempt = 0; attempt <= REVIEW_MAX_RETRIES; attempt += 1) {
+    try {
+      if (attempt > 0) {
+        setProgress(`${stageLabel}失败，正在自动重试 ${attempt}/${REVIEW_MAX_RETRIES}`, null);
+      }
+      return await requestFactory(attempt);
+    } catch (err) {
+      lastErr = err;
+      if (attempt >= REVIEW_MAX_RETRIES) break;
+      if (record) {
+        await updateReviewRecord(record, {
+          status: "重试中",
+          completionState: "retrying",
+          retryCount: attempt + 1,
+          maxRetries: REVIEW_MAX_RETRIES,
+          failureStage,
+          failureReason: errorMessage(err),
+        });
+      }
+      setProgress(`${stageLabel}失败，正在自动重试 ${attempt + 1}/${REVIEW_MAX_RETRIES}：${errorMessage(err)}`, null);
+      await wait(1000);
+    }
+  }
+  throw lastErr || new Error(`${stageLabel}失败`);
+}
+
+function coverageNotice(extraction) {
+  const lines = [];
+  if (extraction?.truncated) {
+    lines.push("抽取文本达到字符上限，报告仅覆盖已成功抽取的内容。");
+  }
+  if (extraction?.kind === "archive" && Number(extraction.processed_file_count || 0) < Number(extraction.file_count || 0)) {
+    lines.push(`压缩包仅处理 ${extraction.processed_file_count || 0}/${extraction.file_count || 0} 个可抽取文件。`);
+  }
+  if (extraction?.page_count && Number(extraction.processed_page_count || 0) < Number(extraction.page_count || 0)) {
+    lines.push(`文档仅处理 ${extraction.processed_page_count || 0}/${extraction.page_count || 0} 页。`);
+  }
+  if (!lines.length) return "";
+  return `> 覆盖范围限制：${lines.join(" ")}\n\n`;
+}
+
+function prependCoverageNotice(report, extraction) {
+  const notice = coverageNotice(extraction);
+  const clean = stripReportEndMarker(report);
+  return notice && !clean.includes("覆盖范围限制") ? `${notice}${clean}` : clean;
 }
 
 async function uploadFileToPath(runtime, file, path, contentType) {
@@ -2232,14 +2405,15 @@ function buildPrompt(extraction, knowledgeRefs, textOverride = "", scope = "全�
       : text;
   const project = currentProject();
   const sourceContext = summarizeSourceRefs(sourceRefs);
+  const reviewContext = reviewPromptContext();
   return `请依据 GB/T 28448-2019《信息安全技术 网络安全等级保护测评要求》与 GB/T 28449-2018《信息安全技术 网络安全等级保护测评过程指南》，审查以下等保资料是否充分、是否存在不符合项或证据缺口。
 
 公司：${currentCompany()?.name || "-"}
 项目：${project?.name || "-"}
 系统名称：${project?.systemName || "-"}
 保护等级：${project?.level || els.level.value}
-文档类型：${els.docKind.value}
-文件名：${selectedFile.name}
+文档类型：${reviewContext.docKind}
+文件名：${reviewContext.filename}
 分析范围：${scope}
 本段来源清单：${sourceContext}
 
@@ -2280,81 +2454,231 @@ async function analyzeWithLlm(extraction, knowledgeRefs, textOverride = "", scop
   });
 }
 
-async function analyzeDocumentWithLlm(extraction, knowledgeRefs) {
-  const chunks = splitReviewTextIntoStructuredChunks(extraction);
-  if (chunks.length <= 1) {
-    return analyzeWithLlm(
-      extraction,
-      knowledgeRefs,
-      chunks[0]?.text || extraction.text || "",
-      "全文",
-      chunks[0]?.sourceRefs || [],
-      2600,
-    );
-  }
-
-  const partialReports = [];
-  for (let index = 0; index < chunks.length; index += 1) {
-    const chunk = chunks[index];
-    const scope = `第 ${index + 1} / ${chunks.length} 段；来源：${summarizeSourceRefs(chunk.sourceRefs)}`;
-    setProgress(`LLM 分段分析 ${index + 1} / ${chunks.length}；${summarizeSourceRefs(chunk.sourceRefs)}`, null);
-    setReportPlain(`正在请求 LLM 分析：${scope}。`);
-    const reply = await analyzeWithLlm(
-      extraction,
-      knowledgeRefs,
-      chunk.text,
-      scope,
-      chunk.sourceRefs,
-      2000,
-    );
-    partialReports.push(`--- 分段审查 ${index + 1} / ${chunks.length} ---\n范围：${scope}\n${extractContent(reply)}`);
-  }
-
-  setProgress("LLM 正在汇总分段结论", null);
+async function summarizeReviewSegmentFindings(report, scope, record) {
   const runtime = await annaReady;
+  const reply = await completeLlmWithRetry(
+    () => runtime.llm.complete({
+      systemPrompt: systemPrompt(),
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: `请把下面这一段审查结果压缩为结构化问题清单，保留来源文件、页码/片段、控制域、风险等级、证据摘要、整改建议和需补充材料。不要新增事实。
+
+范围：${scope}
+
+分段审查结果：
+${compactText(report, 18000, "分段审查结果已截断")}`,
+          },
+        },
+      ],
+      maxTokens: 1000,
+      temperature: 0.1,
+    }),
+    "分段问题清单压缩",
+    record,
+    "summarize",
+  );
+  return extractContent(reply);
+}
+
+function reviewBasePath(record) {
+  if (record?.reportPath) return record.reportPath.replace(/\/report\.md$/, "");
+  if (record?.reportDraftPath) return record.reportDraftPath.replace(/\/report-draft\.md$/, "");
+  return `mlps-review/companies/${record.companyId}/projects/${record.projectId}/reviews/${record.id}`;
+}
+
+async function saveReviewAnalysisCheckpoint(runtime, record, partialReports, findingsDigest) {
+  if (!record) return;
+  const basePath = reviewBasePath(record);
+  const partialReportsPath = `${basePath}/partials.md`;
+  const findingsDigestPath = `${basePath}/findings.md`;
+  await Promise.all([
+    writeTextFile(runtime, partialReportsPath, partialReports.join("\n\n")),
+    writeTextFile(runtime, findingsDigestPath, findingsDigest.join("\n\n")),
+  ]);
+  await updateReviewRecord(record, {
+    partialReportsPath,
+    findingsDigestPath,
+    lastCheckpoint: "partials",
+  });
+}
+
+async function loadReviewAnalysisCheckpoint(runtime, record) {
+  if (!record?.partialReportsPath || !record?.findingsDigestPath) {
+    return null;
+  }
+  try {
+    const [partialText, findingsText] = await Promise.all([
+      readTextFile(runtime, record.partialReportsPath),
+      readTextFile(runtime, record.findingsDigestPath),
+    ]);
+    return {
+      partialReports: partialText ? [partialText] : [],
+      findingsDigest: findingsText ? [findingsText] : [],
+    };
+  } catch {
+    return null;
+  }
+}
+
+function buildFinalReviewPrompt(extraction, knowledgeRefs, findingsDigest, partialReports, chunkMap) {
   const project = currentProject();
+  const reviewContext = reviewPromptContext();
+  const coverage = coverageNotice(extraction) || "无覆盖范围限制。";
+  return `请把以下等保文档审查问题清单合并为一份最终报告。
+
+要求：
+1. 保留总体结论、风险等级、控制域检查结果、修改建议、文档依据、建议补充材料。
+2. 合并重复问题，按风险高/中/低排序。
+3. 明确哪些结论来自上传审查文档，哪些来自公司知识库补充材料，哪些属于证据不足。
+4. 不要声称这是正式测评结论。
+5. 保留并汇总每个问题的来源文件名、页码范围或片段范围；如为多文件综合判断，单独标记。
+6. 必须在最后一行原样输出结束标记：${REVIEW_REPORT_END_MARKER}
+
+公司：${currentCompany()?.name || "-"}
+项目：${project?.name || "-"}
+系统名称：${project?.systemName || "-"}
+保护等级：${project?.level || els.level.value}
+文档类型：${reviewContext.docKind}
+文件名：${reviewContext.filename}
+处理页数：${extraction.processed_page_count || extraction.page_count || "-"} / ${extraction.page_count || "-"}
+覆盖范围限制：${coverage}
+使用知识库：${knowledgeRefs.map((k) => k.title).join("；") || "未使用公司知识库"}
+
+结构化问题清单：
+${compactText(findingsDigest.join("\n\n"), REVIEW_FINDINGS_CONTEXT_CHARS, "结构化问题清单已截断")}
+
+分段来源映射：
+${compactText(chunkMap, 12000, "分段来源映射已截断")}
+
+必要时参考的分段审查原文节选：
+${compactText(partialReports.join("\n\n"), REVIEW_FINAL_CONTEXT_CHARS - REVIEW_FINDINGS_CONTEXT_CHARS, "分段审查原文已截断")}`;
+}
+
+async function completeReviewReportWithValidation(extraction, knowledgeRefs, partialReports, findingsDigest, chunkMap, record) {
+  const runtime = await annaReady;
+  let reply = await completeLlmWithRetry(
+    () => runtime.llm.complete({
+      systemPrompt: systemPrompt(),
+      messages: [
+        {
+          role: "user",
+          content: { type: "text", text: buildFinalReviewPrompt(extraction, knowledgeRefs, findingsDigest, partialReports, chunkMap) },
+        },
+      ],
+      maxTokens: 5200,
+      temperature: 0.2,
+    }),
+    "最终报告汇总",
+    record,
+    "finalize",
+  );
+  let report = extractContent(reply);
+  let validation = isReviewReportComplete(report, reply);
+
+  for (let attempt = 1; !validation.ok && attempt <= REVIEW_MAX_RETRIES; attempt += 1) {
+    await updateReviewRecord(record, {
+      status: "重试中",
+      completionState: "retrying",
+      retryCount: attempt,
+      maxRetries: REVIEW_MAX_RETRIES,
+      failureStage: "finalize",
+      failureReason: validation.reason,
+      llmFinishReason: validation.finishReason,
+    });
+    setProgress(`报告可能不完整，正在自动续写 ${attempt}/${REVIEW_MAX_RETRIES}：${validation.reason}`, null);
+    const continuation = await completeLlmWithRetry(
+      () => runtime.llm.complete({
+        systemPrompt: systemPrompt(),
+        messages: [
+          {
+            role: "user",
+            content: {
+              type: "text",
+              text: `上一轮最终报告没有完整结束。请从断点继续补全，不要重写已完成内容；如果已经完整，请只输出缺失的结尾部分。最后一行必须原样输出：${REVIEW_REPORT_END_MARKER}
+
+当前报告末尾：
+${report.slice(-8000)}`,
+            },
+          },
+        ],
+        maxTokens: 2400,
+        temperature: 0.1,
+      }),
+      "最终报告续写",
+      record,
+      "finalize",
+    );
+    reply = continuation;
+    report = `${stripReportEndMarker(report)}\n\n${extractContent(continuation)}`.trim();
+    validation = isReviewReportComplete(report, continuation);
+  }
+
+  if (!validation.ok) {
+    throw makeIncompleteReportError(validation, report, reply);
+  }
+
+  return {
+    content: prependCoverageNotice(report, extraction),
+    model: reply?.model,
+    finishReason: validation.finishReason,
+    reviewMeta: {
+      reportComplete: true,
+      llmFinishReason: validation.finishReason,
+      retryCount: record?.retryCount || 0,
+    },
+  };
+}
+
+async function analyzeDocumentWithLlm(extraction, knowledgeRefs, record = null) {
+  const runtime = await annaReady;
+  const chunks = splitReviewTextIntoStructuredChunks(extraction);
+  if (!chunks.length) throw new Error("没有可分析的审查文本分段。");
   const chunkMap = chunks
     .map((chunk, index) => {
       const scope = `第 ${index + 1} / ${chunks.length} 段；来源：${summarizeSourceRefs(chunk.sourceRefs)}`;
       return `- ${scope}`;
     })
     .join("\n");
-  return runtime.llm.complete({
-    systemPrompt: systemPrompt(),
-    messages: [
-      {
-        role: "user",
-        content: {
-          type: "text",
-          text: `请把以下分段等保文档审查结果合并为一份最终报告。
 
-要求：
-1. 保留总体结论、风险等级、控制域检查结果、修改建议、文档依据、建议补充材料。
-2. 合并重复问题，按风险高低排序。
-3. 明确哪些结论来自上传审查文档，哪些来自公司知识库补充材料，哪些属于证据不足。
-4. 不要声称这是正式测评结论。
-5. 保留并汇总每个问题的来源文件名、页码范围或片段范围；如为多文件综合判断，单独标记。
+  const checkpoint = await loadReviewAnalysisCheckpoint(runtime, record);
+  let partialReports = checkpoint?.partialReports || [];
+  let findingsDigest = checkpoint?.findingsDigest || [];
 
-公司：${currentCompany()?.name || "-"}
-项目：${project?.name || "-"}
-系统名称：${project?.systemName || "-"}
-保护等级：${project?.level || els.level.value}
-文档类型：${els.docKind.value}
-处理页数：${extraction.processed_page_count || extraction.page_count || "-"} / ${extraction.page_count || "-"}
-使用知识库：${knowledgeRefs.map((k) => k.title).join("；") || "未使用公司知识库"}
+  if (!partialReports.length || !findingsDigest.length) {
+    partialReports = [];
+    findingsDigest = [];
+    for (let index = 0; index < chunks.length; index += 1) {
+      const chunk = chunks[index];
+      const scope = `第 ${index + 1} / ${chunks.length} 段；来源：${summarizeSourceRefs(chunk.sourceRefs)}`;
+      setProgress(`LLM 分段分析 ${index + 1} / ${chunks.length}；${summarizeSourceRefs(chunk.sourceRefs)}`, null);
+      setReportPlain(`正在请求 LLM 分析：${scope}。`);
+      const reply = await completeLlmWithRetry(
+        () => analyzeWithLlm(
+          extraction,
+          knowledgeRefs,
+          chunk.text,
+          chunks.length <= 1 ? "全文" : scope,
+          chunk.sourceRefs,
+          chunks.length <= 1 ? 2800 : 2200,
+        ),
+        `分段审查 ${index + 1}/${chunks.length}`,
+        record,
+        "analyze",
+      );
+      const report = `--- 分段审查 ${index + 1} / ${chunks.length} ---\n范围：${scope}\n${extractContent(reply)}`;
+      partialReports.push(report);
+      findingsDigest.push(await summarizeReviewSegmentFindings(report, scope, record));
+    }
+    await saveReviewAnalysisCheckpoint(runtime, record, partialReports, findingsDigest);
+  } else {
+    setProgress("已读取分段审查检查点，正在重新汇总最终报告", null);
+  }
 
-分段审查结果：
-
-${partialReports.join("\n\n")}
-
-分段来源映射：
-${chunkMap}`,
-        },
-      },
-    ],
-    maxTokens: 3800,
-    temperature: 0.2,
-  });
+  setProgress("LLM 正在汇总分段结论", null);
+  return completeReviewReportWithValidation(extraction, knowledgeRefs, partialReports, findingsDigest, chunkMap, record);
 }
 
 function tokenize(text) {
@@ -2378,7 +2702,7 @@ async function matchKnowledge(runtime, extraction, seedExtras = []) {
     project?.name || "",
     project?.systemName || "",
     project?.level || "",
-    els.docKind.value,
+    reviewPromptContext().docKind,
     ...seedExtras,
   ].join("\n");
   const query = tokenize(seed);
@@ -2911,129 +3235,325 @@ async function runInterpretChatTurn(record, content, retry = true) {
   }
 }
 
+function reviewRecordPatchFromExtraction(extraction) {
+  return {
+    processedPages: extraction.kind === "archive"
+      ? extraction.processed_file_count || null
+      : extraction.processed_page_count || extraction.page_count || null,
+    pageCount: extraction.kind === "archive" ? extraction.file_count || null : extraction.page_count || null,
+    extractionTruncated: Boolean(extraction.truncated),
+    sourceArchive: extraction.kind === "archive"
+      ? {
+          kind: extraction.archive_kind || archiveKind(extraction.filename),
+          fileCount: extraction.file_count || 0,
+          processedFileCount: extraction.processed_file_count || 0,
+          entries: extraction.entries || [],
+          skipped: extraction.skipped || [],
+        }
+      : null,
+    extractionMeta: {
+      kind: extraction.kind || "",
+      filename: extraction.filename || "",
+      mime_type: extraction.mime_type || "",
+      page_count: extraction.page_count || null,
+      processed_page_count: extraction.processed_page_count || null,
+      file_count: extraction.file_count || null,
+      processed_file_count: extraction.processed_file_count || null,
+      paragraph_count: extraction.paragraph_count || null,
+      line_count: extraction.line_count || null,
+      truncated: Boolean(extraction.truncated),
+      ocr_used: Boolean(extraction.ocr_used),
+      ocr_page_count: extraction.ocr_page_count || 0,
+      ocr_lang: extraction.ocr_lang || "",
+      warnings: extraction.warnings || [],
+      entries: extraction.entries || [],
+      skipped: extraction.skipped || [],
+    },
+  };
+}
+
+function extractionFromRecord(record, text) {
+  const meta = record.extractionMeta || {};
+  return {
+    ...meta,
+    kind: meta.kind || (record.sourceArchive ? "archive" : fileExt(record.sourceFilename || "")),
+    filename: meta.filename || record.sourceFilename || basename(record.sourceFilePath) || "source-document",
+    mime_type: meta.mime_type || record.sourceMimeType || "",
+    text,
+    warnings: meta.warnings || record.extractionWarnings || [],
+    entries: meta.entries || record.sourceArchive?.entries || [],
+    skipped: meta.skipped || record.sourceArchive?.skipped || [],
+  };
+}
+
+async function updateReviewRecord(record, patch) {
+  if (!record) return null;
+  Object.assign(record, patch, { updatedAt: nowIso() });
+  await saveStateSlice("reviews");
+  renderRecordList();
+  if (modalState.type === "record-view" && modalState.payload?.record?.id === record.id) {
+    modalState.payload.record = record;
+    renderModal();
+  }
+  return record;
+}
+
+function makeReviewRecord({ id, company, project, filename, contentType, size, sourceFilePath, basePath, params, status = "运行中" }) {
+  const now = nowIso();
+  return {
+    id,
+    companyId: company.id,
+    projectId: project.id,
+    title: `${filename} · ${formatDate(now)}`,
+    sourceFilePath,
+    sourceFilename: filename,
+    sourceMimeType: contentType,
+    sourceSizeBytes: size || 0,
+    extractedTextPath: `${basePath}/extracted.txt`,
+    reportPath: `${basePath}/report.md`,
+    reportDraftPath: `${basePath}/report-draft.md`,
+    partialReportsPath: `${basePath}/partials.md`,
+    findingsDigestPath: `${basePath}/findings.md`,
+    status,
+    completionState: "running",
+    processedPages: null,
+    pageCount: null,
+    knowledgeRefs: [],
+    params,
+    retryCount: 0,
+    maxRetries: REVIEW_MAX_RETRIES,
+    reportComplete: false,
+    reportDraftAvailable: false,
+    extractionTruncated: false,
+    llmFinishReason: "",
+    failureStage: "",
+    failureReason: "",
+    lastCheckpoint: "created",
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function sourceForRecord(record) {
+  if (!record?.sourceFilePath) throw new Error("审查记录缺少源文件路径，无法重新审查。");
+  const fileLike = {
+    name: record.sourceFilename || basename(record.sourceFilePath) || "source-document",
+    size: record.sourceSizeBytes || localFileStore.get(record.sourceFilePath)?.size || 0,
+  };
+  return {
+    fileLike,
+    source: storedSource(record.sourceMimeType || guessMime(fileLike.name), record.sourceFilePath),
+  };
+}
+
 async function runAnalysis() {
   const runtime = await annaReady;
   const project = currentProject();
   const company = currentCompany();
   if (!selectedFile || !project || !company) return;
+  const recordId = newId("review");
+  const safeName = sanitizeFilename(selectedFile.name);
+  const basePath = `mlps-review/companies/${company.id}/projects/${project.id}/reviews/${recordId}`;
+  const contentType = selectedFile.type || guessMime(selectedFile.name);
+  const sourceFilePath = `${basePath}/source/${safeName}`;
+  const params = {
+    level: project.level,
+    docKind: els.docKind.value,
+    maxPages: selectedProcessPages(),
+    ocrDpi: OCR_DPI,
+  };
+  const record = makeReviewRecord({
+    id: recordId,
+    company,
+    project,
+    filename: selectedFile.name,
+    contentType,
+    size: selectedFile.size,
+    sourceFilePath,
+    basePath,
+    params,
+  });
+  appState.reviews.unshift(record);
+  selectedRecordId = recordId;
+  await saveStateSlice("reviews");
+  renderRecordList();
+
+  await runReviewWorkflow({
+    runtime,
+    record,
+    file: selectedFile,
+    sourceFilePath,
+    contentType,
+    uploadSource: true,
+    params,
+  });
+}
+
+async function runReviewWorkflow({ runtime, record, file, sourceFilePath, contentType, uploadSource = false, params = {}, reuseCheckpoints = false }) {
+  const project = currentProject();
+  const company = currentCompany();
+  if (!record || !project || !company) return;
   setBusy(true);
+  activeWorkstream = "review";
+  activeReviewParams = {
+    docKind: params.docKind || record.params?.docKind || els.docKind.value,
+    filename: file?.name || record.sourceFilename || basename(record.sourceFilePath) || "-",
+    maxPages: params.maxPages || record.params?.maxPages || selectedProcessPages(),
+  };
   resetSteps();
   resetProgress();
   setReportPlain("正在读取文档。");
   els.text.textContent = "";
   els.statModel.textContent = "等待";
-
-  const recordId = newId("review");
-  const safeName = sanitizeFilename(selectedFile.name);
-  const basePath = `mlps-review/companies/${company.id}/projects/${project.id}/reviews/${recordId}`;
-  const contentType = selectedFile.type || guessMime(selectedFile.name);
+  els.statName.textContent = activeReviewParams.filename;
+  await updateReviewRecord(record, {
+    status: "运行中",
+    completionState: "running",
+    retryCount: 0,
+    maxRetries: REVIEW_MAX_RETRIES,
+    reportComplete: false,
+    failureStage: "",
+    failureReason: "",
+    llmFinishReason: "",
+  });
 
   try {
     markStep("extract", "active");
-    setProgress("正在上传审查源文件", null);
-    const sourceFilePath = await uploadFileToPath(runtime, selectedFile, `${basePath}/source/${safeName}`, contentType);
-    const source =
-      selectedFile.size <= INLINE_CAP_BYTES
-        ? await inlineSource(selectedFile, contentType)
-        : storedSource(contentType, sourceFilePath);
-    const extraction = await extractStoredDocument(runtime, selectedFile, source);
+    let source;
+    let fileLike = file;
+    if (reuseCheckpoints && record.extractedTextPath && record.extractionMeta) {
+      setProgress("正在读取上次抽取检查点", null);
+      const checkpointText = await readTextFile(runtime, record.extractedTextPath);
+      const extraction = extractionFromRecord(record, checkpointText);
+      latestExtraction = extraction;
+      markStep("extract", "done");
+      await continueReviewAfterExtraction(runtime, record, extraction, params);
+      return;
+    }
+    if (uploadSource) {
+      setProgress("正在上传审查源文件", null);
+      await uploadFileToPath(runtime, file, sourceFilePath, contentType);
+      source =
+        file.size <= INLINE_CAP_BYTES
+          ? await inlineSource(file, contentType)
+          : storedSource(contentType, sourceFilePath);
+      await updateReviewRecord(record, { sourceFilePath, lastCheckpoint: "source" });
+    } else {
+      const fromRecord = sourceForRecord(record);
+      fileLike = fromRecord.fileLike;
+      source = fromRecord.source;
+      setProgress("正在读取归档源文件", null);
+    }
+    const extraction = await extractStoredDocument(runtime, fileLike, source, activeReviewParams.maxPages);
     latestExtraction = extraction;
     markStep("extract", "done");
-
-    const text = extraction.text || "";
-    const warnings = Array.isArray(extraction.warnings) ? [...extraction.warnings] : [];
-    els.statText.textContent = `${text.length.toLocaleString("zh-CN")} 字`;
-
-    if (!text.trim()) {
-      throw new Error(emptyExtractionMessage(extraction));
-    }
-
-    markStep("knowledge", "active");
-    setProgress("正在匹配公司知识库", null);
-    const knowledgeRefs = await matchKnowledge(runtime, extraction);
-    latestKnowledgeRefs = knowledgeRefs;
-    els.statKnowledge.textContent = knowledgeRefs.length ? `${knowledgeRefs.length} 条` : "未使用";
-    markStep("knowledge", "done");
-
-    els.text.textContent = [
-      `文件：${extraction.filename || selectedFile.name}`,
-      `类型：${extraction.kind || fileExt(selectedFile.name)}`,
-      extraction.kind === "archive" ? `压缩包文件：已抽取 ${extraction.processed_file_count || 0} / ${extraction.file_count || 0} 个` : "",
-      `页数/段落：${extraction.page_count ?? extraction.paragraph_count ?? extraction.line_count ?? "-"}`,
-      extraction.ocr_used ? `OCR：已启用，识别 ${extraction.ocr_page_count || 0} 页，语言 ${extraction.ocr_lang || "-"}` : "",
-      extraction.entries?.length ? `参与文件：${extraction.entries.map((entry) => entry.path).join("；")}` : "",
-      knowledgeRefs.length ? `知识库：${knowledgeRefs.map((k) => k.title).join("；")}` : "知识库：未使用公司知识库",
-      warnings.length ? `提示：${warnings.join("；")}` : "",
-      "",
-      text,
-    ].filter(Boolean).join("\n");
-
-    setProgress("正在请求 LLM 合规分析", null);
-    setReportPlain("正在请求 LLM 分析。");
-    markStep("analyze", "active");
-    const reply = await analyzeDocumentWithLlm(extraction, knowledgeRefs);
-    markStep("analyze", "done");
-
-    latestReport = extractContent(reply);
-    setReportMarkdown(latestReport);
-    els.statModel.textContent = reply?.model || "已完成";
-
-    markStep("save", "active");
-    const extractedTextPath = `${basePath}/extracted.txt`;
-    const reportPath = `${basePath}/report.md`;
-    await writeTextFile(runtime, extractedTextPath, text);
-    await writeTextFile(runtime, reportPath, latestReport);
-    const now = nowIso();
-    appState.reviews.unshift({
-      id: recordId,
-      companyId: company.id,
-      projectId: project.id,
-      title: `${selectedFile.name} · ${formatDate(now)}`,
-      sourceFilePath,
-      sourceFilename: selectedFile.name,
-      sourceMimeType: contentType,
-      sourceSizeBytes: selectedFile.size,
-      extractedTextPath,
-      reportPath,
-      status: "已完成",
-      processedPages: extraction.kind === "archive"
-        ? extraction.processed_file_count || null
-        : extraction.processed_page_count || extraction.page_count || null,
-      pageCount: extraction.kind === "archive" ? extraction.file_count || null : extraction.page_count || null,
-      sourceArchive: extraction.kind === "archive"
-        ? {
-            kind: extraction.archive_kind || archiveKind(selectedFile.name),
-            fileCount: extraction.file_count || 0,
-            processedFileCount: extraction.processed_file_count || 0,
-            entries: extraction.entries || [],
-            skipped: extraction.skipped || [],
-          }
-        : null,
-      knowledgeRefs: knowledgeRefs.map((k) => ({ id: k.id, title: k.title, score: k.score })),
-      params: {
-        level: project.level,
-        docKind: els.docKind.value,
-        maxPages: selectedProcessPages(),
-        ocrDpi: OCR_DPI,
-      },
-      createdAt: now,
-      updatedAt: now,
-    });
-    await saveStateSlice("reviews");
-    markStep("save", "done");
-    markStep("done", "done");
-    finishProgress("审查完成并已归档");
-
-    selectedRecordId = recordId;
-    renderRecordList();
-    showResultTab("report");
+    await continueReviewAfterExtraction(runtime, record, extraction, params);
   } catch (err) {
     const active = document.querySelector("#steps li.active");
     if (active) active.classList.add("error");
+    const draftPath = err.partialReport
+      ? await writeTextFile(runtime, record.reportDraftPath, err.partialReport).catch(() => record.reportDraftPath)
+      : record.reportDraftPath;
+    await updateReviewRecord(record, {
+      status: "失败",
+      completionState: "failed",
+      reportComplete: false,
+      reportDraftPath: err.partialReport ? draftPath : record.reportDraftPath,
+      reportDraftAvailable: Boolean(err.partialReport),
+      failureStage: err.failureStage || active?.dataset?.step || "analysis",
+      failureReason: errorMessage(err),
+      llmFinishReason: err.llmFinishReason || "",
+      maxRetries: REVIEW_MAX_RETRIES,
+    });
     setReportPlain(formatError("analysis", err));
+    setProgress("审查失败，已保留记录，可手动重新审查", null);
+    selectedRecordId = record.id;
+    renderRecordList();
   } finally {
     setBusy(false);
+    activeReviewParams = null;
   }
+}
+
+async function continueReviewAfterExtraction(runtime, record, extraction, params = {}) {
+  const text = extraction.text || "";
+  const warnings = Array.isArray(extraction.warnings) ? [...extraction.warnings] : [];
+  els.statText.textContent = `${text.length.toLocaleString("zh-CN")} 字`;
+
+  if (!text.trim()) {
+    const err = new Error(emptyExtractionMessage(extraction));
+    err.failureStage = "extract";
+    throw err;
+  }
+
+  setProgress("正在保存抽取文本检查点", null);
+  await writeTextFile(runtime, record.extractedTextPath, text);
+  await updateReviewRecord(record, {
+    ...reviewRecordPatchFromExtraction(extraction),
+    lastCheckpoint: "extracted",
+  });
+
+  markStep("knowledge", "active");
+  setProgress("正在匹配公司知识库", null);
+  const knowledgeRefs = await matchKnowledge(runtime, extraction);
+  latestKnowledgeRefs = knowledgeRefs;
+  els.statKnowledge.textContent = knowledgeRefs.length ? `${knowledgeRefs.length} 条` : "未使用";
+  await updateReviewRecord(record, {
+    knowledgeRefs: knowledgeRefs.map((k) => ({ id: k.id, title: k.title, score: k.score })),
+    lastCheckpoint: "knowledge",
+  });
+  markStep("knowledge", "done");
+
+  els.text.textContent = [
+    `文件：${extraction.filename || record.sourceFilename}`,
+    `类型：${extraction.kind || fileExt(record.sourceFilename || "")}`,
+    extraction.kind === "archive" ? `压缩包文件：已抽取 ${extraction.processed_file_count || 0} / ${extraction.file_count || 0} 个` : "",
+    `页数/段落：${extraction.page_count ?? extraction.paragraph_count ?? extraction.line_count ?? "-"}`,
+    extraction.ocr_used ? `OCR：已启用，识别 ${extraction.ocr_page_count || 0} 页，语言 ${extraction.ocr_lang || "-"}` : "",
+    extraction.entries?.length ? `参与文件：${extraction.entries.map((entry) => entry.path).join("；")}` : "",
+    knowledgeRefs.length ? `知识库：${knowledgeRefs.map((k) => k.title).join("；")}` : "知识库：未使用公司知识库",
+    warnings.length ? `提示：${warnings.join("；")}` : "",
+    "",
+    text,
+  ].filter(Boolean).join("\n");
+
+  setProgress("正在请求 LLM 合规分析", null);
+  setReportPlain("正在请求 LLM 分析。");
+  markStep("analyze", "active");
+  const reply = await analyzeDocumentWithLlm(extraction, knowledgeRefs, record);
+  markStep("analyze", "done");
+
+  latestReport = extractContent(reply);
+  setReportMarkdown(latestReport);
+  els.statModel.textContent = reply?.model || "已完成";
+
+  markStep("save", "active");
+  await writeTextFile(runtime, record.reportPath, latestReport);
+  await updateReviewRecord(record, {
+    status: "已完成",
+    completionState: "complete",
+    reportComplete: true,
+    reportDraftAvailable: false,
+    failureStage: "",
+    failureReason: "",
+    llmFinishReason: reply?.finishReason || reply?.reviewMeta?.llmFinishReason || "",
+    retryCount: record.retryCount || 0,
+    maxRetries: REVIEW_MAX_RETRIES,
+    lastCheckpoint: "report",
+    params: {
+      level: currentProject()?.level,
+      docKind: activeReviewParams?.docKind || params.docKind || els.docKind.value,
+      maxPages: activeReviewParams?.maxPages || params.maxPages || selectedProcessPages(),
+      ocrDpi: OCR_DPI,
+    },
+  });
+  markStep("save", "done");
+  markStep("done", "done");
+  finishProgress("审查完成并已归档");
+
+  selectedRecordId = record.id;
+  renderRecordList();
+  showResultTab("report");
 }
 
 async function runInterpretation() {
@@ -3311,7 +3831,7 @@ async function viewRecord(id) {
   openModal("record-view", { record, loading: true });
   try {
     const [report, extracted] = await Promise.all([
-      readTextFile(runtime, record.reportPath),
+      reviewReportPath(record) ? readTextFile(runtime, reviewReportPath(record)) : Promise.resolve(""),
       readTextFile(runtime, record.extractedTextPath).catch(() => ""),
     ]);
     openModal("record-view", { record, report, extracted, loading: false });
@@ -3328,25 +3848,33 @@ async function deleteRecord(id = selectedRecordId) {
   selectedRecordId = null;
   await saveStateSlice("reviews");
   await Promise.all([
-    deleteFileQuietly(runtime, record.sourceFilePath),
+    isReviewSourcePathStillReferenced(record.sourceFilePath) ? Promise.resolve() : deleteFileQuietly(runtime, record.sourceFilePath),
     deleteFileQuietly(runtime, record.extractedTextPath),
     deleteFileQuietly(runtime, record.reportPath),
+    deleteFileQuietly(runtime, record.reportDraftPath),
+    deleteFileQuietly(runtime, record.partialReportsPath),
+    deleteFileQuietly(runtime, record.findingsDigestPath),
   ]);
   renderRecordList();
   closeModal();
 }
 
+function isReviewSourcePathStillReferenced(path) {
+  return Boolean(path && appState.reviews.some((r) => r.sourceFilePath === path));
+}
+
 async function downloadRecord(id = selectedRecordId) {
   const runtime = await annaReady;
   const record = appState.reviews.find((r) => r.id === id);
-  if (!record?.reportPath) return;
-  if (localFileStore.has(record.reportPath)) {
-    await downloadLocalFile(record.reportPath, `${sanitizeFilename(record.title)}.md`);
+  const path = reviewReportPath(record);
+  if (!path) return;
+  if (localFileStore.has(path)) {
+    await downloadLocalFile(path, `${sanitizeFilename(record.title)}${record.reportComplete === false ? ".partial" : ""}.md`);
     return;
   }
   await runtime.files.download({
-    path: record.reportPath,
-    filename: `${sanitizeFilename(record.title)}.md`,
+    path,
+    filename: `${sanitizeFilename(record.title)}${record.reportComplete === false ? ".partial" : ""}.md`,
   });
 }
 
@@ -3361,6 +3889,70 @@ async function downloadSourceFile(id = selectedRecordId) {
   await runtime.files.download({
     path: record.sourceFilePath,
     filename: sanitizeFilename(record.sourceFilename || basename(record.sourceFilePath) || record.title || "source-document"),
+  });
+}
+
+async function rerunRecord(id = selectedRecordId) {
+  const runtime = await annaReady;
+  const original = appState.reviews.find((r) => r.id === id);
+  const project = currentProject();
+  const company = currentCompany();
+  if (!original || !project || !company || reviewIsRunning(original)) return;
+  closeModal();
+  showMainTab("review");
+  showResultTab("report");
+  const contentType = original.sourceMimeType || guessMime(original.sourceFilename || original.sourceFilePath || "");
+  const params = {
+    level: project.level,
+    docKind: original.params?.docKind || els.docKind.value,
+    maxPages: original.params?.maxPages || selectedProcessPages(),
+    ocrDpi: original.params?.ocrDpi || OCR_DPI,
+  };
+
+  let record = original;
+  let reuseCheckpoints = true;
+  if (reviewIsComplete(original)) {
+    const recordId = newId("review");
+    const basePath = `mlps-review/companies/${company.id}/projects/${project.id}/reviews/${recordId}`;
+    record = makeReviewRecord({
+      id: recordId,
+      company,
+      project,
+      filename: original.sourceFilename || basename(original.sourceFilePath) || original.title || "source-document",
+      contentType,
+      size: original.sourceSizeBytes || 0,
+      sourceFilePath: original.sourceFilePath,
+      basePath,
+      params,
+    });
+    appState.reviews.unshift(record);
+    await saveStateSlice("reviews");
+    reuseCheckpoints = false;
+  } else {
+    await deleteFileQuietly(runtime, original.reportDraftPath);
+    await updateReviewRecord(record, {
+      reportComplete: false,
+      reportDraftAvailable: false,
+      status: "运行中",
+      completionState: "running",
+      failureStage: "",
+      failureReason: "",
+      retryCount: 0,
+      llmFinishReason: "",
+    });
+  }
+
+  selectedRecordId = record.id;
+  setReportPlain(reviewIsComplete(original) ? "正在基于原源文件生成新的审查记录。" : "正在从上次失败点重新审查。");
+  await runReviewWorkflow({
+    runtime,
+    record,
+    file: null,
+    sourceFilePath: record.sourceFilePath,
+    contentType,
+    uploadSource: false,
+    params,
+    reuseCheckpoints,
   });
 }
 
@@ -3649,7 +4241,14 @@ async function deleteCompany(id = modalState.payload?.company?.id || appState.in
   await Promise.all(interprets.map((r) => deleteInterpretSessionQuietly(r)));
   await Promise.all([
     ...knowledge.flatMap((k) => [deleteFileQuietly(runtime, k.sourceFilePath), deleteFileQuietly(runtime, k.textPath)]),
-    ...reviews.flatMap((r) => [deleteFileQuietly(runtime, r.sourceFilePath), deleteFileQuietly(runtime, r.extractedTextPath), deleteFileQuietly(runtime, r.reportPath)]),
+    ...reviews.flatMap((r) => [
+      deleteFileQuietly(runtime, r.sourceFilePath),
+      deleteFileQuietly(runtime, r.extractedTextPath),
+      deleteFileQuietly(runtime, r.reportPath),
+      deleteFileQuietly(runtime, r.reportDraftPath),
+      deleteFileQuietly(runtime, r.partialReportsPath),
+      deleteFileQuietly(runtime, r.findingsDigestPath),
+    ]),
     ...interprets.flatMap((r) => [
       deleteFileQuietly(runtime, r.sourceFilePath),
       deleteFileQuietly(runtime, r.extractedTextPath),
@@ -3679,6 +4278,9 @@ async function deleteProject(id = modalState.payload?.project?.id || appState.in
       deleteFileQuietly(runtime, r.sourceFilePath),
       deleteFileQuietly(runtime, r.extractedTextPath),
       deleteFileQuietly(runtime, r.reportPath),
+      deleteFileQuietly(runtime, r.reportDraftPath),
+      deleteFileQuietly(runtime, r.partialReportsPath),
+      deleteFileQuietly(runtime, r.findingsDigestPath),
     ]),
     ...interprets.flatMap((r) => [
       deleteFileQuietly(runtime, r.sourceFilePath),
@@ -3850,6 +4452,7 @@ for (const table of [els.recordList, els.interpretList, els.knowledgeList, els.c
     const id = btn.dataset.id;
     const action = btn.dataset.action;
     if (action === "view-record") await viewRecord(id);
+    if (action === "rerun-record") await rerunRecord(id);
     if (action === "download-source") await downloadSourceFile(id);
     if (action === "download-record") await downloadRecord(id);
     if (action === "delete-record") await deleteRecord(id);
@@ -3888,6 +4491,7 @@ els.modalBackdrop.addEventListener("click", async (event) => {
   if (action === "delete-project") await deleteProject();
   if (action === "download-source") await downloadSourceFile(selectedRecordId);
   if (action === "download-record") await downloadRecord(selectedRecordId);
+  if (action === "rerun-record") await rerunRecord(selectedRecordId);
   if (action === "share-report") {
     await shareReportToChat(modalState.payload?.report || latestReport);
   }

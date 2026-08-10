@@ -986,6 +986,21 @@ dd {
   font-weight: 720;
 }
 
+.status-chip.running {
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+.status-chip.warning {
+  background: #fff7ed;
+  color: #b45309;
+}
+
+.status-chip.error {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
 .table-actions {
   display: flex;
   gap: 6px;
@@ -999,6 +1014,23 @@ dd {
   padding: 0 9px;
   border-radius: 6px;
   font-size: 12px;
+}
+
+.modal-alert {
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid #fed7aa;
+  border-radius: var(--radius);
+  background: #fff7ed;
+  color: #9a3412;
+  white-space: pre-wrap;
+  line-height: 1.65;
+}
+
+.modal-alert.error {
+  border-color: #fecaca;
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 
 .item-list {
