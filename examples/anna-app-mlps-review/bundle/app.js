@@ -1715,7 +1715,19 @@ async function extractArchiveInEntries(runtime, file, source, processPageLimit) 
   const chunks = [];
   const extractedEntries = [];
   const archiveCacheId = listing.archive_cache_id || "";
-  const archiveEntryArgs = archiveCacheId ? { archive_cache_id: archiveCacheId } : archiveArgs;
+  // Staging may run each tools.invoke in a fresh Executa process, so the
+  // cache id returned by list_archive is not guaranteed to exist for the
+  // following entry extraction calls. Prefer a durable source reference.
+  const hasDurableArchiveSource = Boolean(
+    archiveArgs.download_url ||
+    archiveArgs.bytes_b64 ||
+    archiveArgs.local_path,
+  );
+  const archiveEntryArgs = hasDurableArchiveSource
+    ? archiveArgs
+    : archiveCacheId
+      ? { archive_cache_id: archiveCacheId }
+      : archiveArgs;
   let totalChars = 0;
   let processedFiles = 0;
   let totalPages = 0;
