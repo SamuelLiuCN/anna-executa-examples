@@ -93,7 +93,7 @@ For staging, build and publish with the repository workflow:
 ```
 
 The workflow builds Anna binary archives for the Executa tag
-`document-extractor-v0.1.6`. Each archive contains a `manifest.json` and
+`document-extractor-v0.1.7`. Each archive contains a `manifest.json` and
 `bin/tool-intern2-document-extractor-u2n2j8x5`, matching the official binary
 packaging guide:
 
@@ -110,7 +110,7 @@ If publishing manually, upload equivalent assets first, make sure
 
 ```bash
 anna-app apps push --profile binary
-anna-app apps cut 0.1.6 --changelog "Add report completeness checks, retries, and rerun support"
+anna-app apps cut 0.1.7 --changelog "Add app logo and release version sync"
 ```
 
 OCR still requires the runtime machine to provide the Tesseract executable and

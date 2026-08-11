@@ -1,7 +1,7 @@
 {
   "slug": "document-extractor",
   "name": "Document Extractor",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "executa_type": "tool",
   "description": "Extracts plain text from documents, spreadsheets, and archives for the MLPS Review Anna App.",
   "tool_id": "tool-intern2-document-extractor-u2n2j8x5",
@@ -26,17 +26,17 @@
         ],
         "binary_urls": {
           "darwin-arm64": {
-            "url": "https://github.com/SamuelLiuCN/anna-executa-examples/releases/download/document-extractor-v0.1.6/tool-intern2-document-extractor-u2n2j8x5-darwin-arm64.tar.gz",
+            "url": "https://github.com/SamuelLiuCN/anna-executa-examples/releases/download/document-extractor-v0.1.7/tool-intern2-document-extractor-u2n2j8x5-darwin-arm64.tar.gz",
             "entrypoint": "tool-intern2-document-extractor-u2n2j8x5",
             "format": "tar.gz"
           },
           "darwin-x86_64": {
-            "url": "https://github.com/SamuelLiuCN/anna-executa-examples/releases/download/document-extractor-v0.1.6/tool-intern2-document-extractor-u2n2j8x5-darwin-x86_64.tar.gz",
+            "url": "https://github.com/SamuelLiuCN/anna-executa-examples/releases/download/document-extractor-v0.1.7/tool-intern2-document-extractor-u2n2j8x5-darwin-x86_64.tar.gz",
             "entrypoint": "tool-intern2-document-extractor-u2n2j8x5",
             "format": "tar.gz"
           },
           "linux-x86_64": {
-            "url": "https://github.com/SamuelLiuCN/anna-executa-examples/releases/download/document-extractor-v0.1.6/tool-intern2-document-extractor-u2n2j8x5-linux-x86_64.tar.gz",
+            "url": "https://github.com/SamuelLiuCN/anna-executa-examples/releases/download/document-extractor-v0.1.7/tool-intern2-document-extractor-u2n2j8x5-linux-x86_64.tar.gz",
             "entrypoint": "tool-intern2-document-extractor-u2n2j8x5",
             "format": "tar.gz"
           }

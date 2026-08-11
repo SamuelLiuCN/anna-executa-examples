@@ -1,7 +1,7 @@
 {
   "slug": "mlps-review",
   "name": "MLPS Review",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "tagline": "Manage MLPS projects, knowledge bases, and document review records.",
   "description": "MLPS Review helps teams manage companies, MLPS projects, company knowledge bases, and document review records. The app extracts PDF, DOCX, XLSX, CSV, TXT, Markdown, and archive source text with a bundled Executa, retrieves relevant company knowledge, and asks the host LLM for compliance gaps, evidence, and remediation suggestions.",
   "category": "developer-tools",

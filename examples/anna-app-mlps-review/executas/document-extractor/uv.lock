@@ -264,7 +264,7 @@ wheels = [
 
 [[package]]
 name = "tool-intern2-document-extractor-u2n2j8x5"
-version = "0.1.6"
+version = "0.1.7"
 source = { editable = "." }
 dependencies = [
     { name = "openpyxl" },
