@@ -5,7 +5,7 @@
   "tagline": "Manage MLPS projects, knowledge bases, and document review records.",
   "description": "MLPS Review helps teams manage companies, MLPS projects, company knowledge bases, and document review records. The app extracts PDF, DOCX, XLSX, CSV, TXT, Markdown, and archive source text with a bundled Executa, retrieves relevant company knowledge, and asks the host LLM for compliance gaps, evidence, and remediation suggestions.",
   "category": "developer-tools",
-  "logo_url": "https://raw.githubusercontent.com/SamuelLiuCN/anna-executa-examples/mpls-review/examples/anna-app-mlps-review/assets/logo.png",
+  "logo_url": "https://cdn.anna.partners/staging/app-logos/195-mlps-review/20260810085858_83ee559c.webp",
   "cover_url": "https://example.com/mlps-review/cover.png",
   "screenshots": [],
   "homepage_url": "https://github.com/openclaw/anna-executa-examples/tree/main/examples/anna-app-mlps-review",
