@@ -1,6 +1,6 @@
 [project]
 name = "tool-intern2-document-extractor-u2n2j8x5"
-version = "0.1.7"
+version = "0.1.8"
 description = "Anna Executa document and archive text extractor for MLPS Review"
 requires-python = ">=3.11"
 dependencies = [

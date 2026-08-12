@@ -1,7 +1,7 @@
 {
   "slug": "document-extractor",
   "name": "Document Extractor",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "executa_type": "tool",
   "description": "Extracts plain text from documents, spreadsheets, and archives for the MLPS Review Anna App.",
   "tool_id": "tool-intern2-document-extractor-u2n2j8x5",
@@ -24,19 +24,19 @@
           "import_archive_chunk",
           "extract_archive_entry"
         ],
-        "binary_urls": {
+        "binary_artifacts": {
           "darwin-arm64": {
-            "url": "https://github.com/SamuelLiuCN/anna-executa-examples/releases/download/document-extractor-v0.1.7/tool-intern2-document-extractor-u2n2j8x5-darwin-arm64.tar.gz",
+            "path": "bundle/tool-intern2-document-extractor-u2n2j8x5-v{version}-darwin-arm64.tar.gz",
             "entrypoint": "tool-intern2-document-extractor-u2n2j8x5",
             "format": "tar.gz"
           },
           "darwin-x86_64": {
-            "url": "https://github.com/SamuelLiuCN/anna-executa-examples/releases/download/document-extractor-v0.1.7/tool-intern2-document-extractor-u2n2j8x5-darwin-x86_64.tar.gz",
+            "path": "bundle/tool-intern2-document-extractor-u2n2j8x5-v{version}-darwin-x86_64.tar.gz",
             "entrypoint": "tool-intern2-document-extractor-u2n2j8x5",
             "format": "tar.gz"
           },
           "linux-x86_64": {
-            "url": "https://github.com/SamuelLiuCN/anna-executa-examples/releases/download/document-extractor-v0.1.7/tool-intern2-document-extractor-u2n2j8x5-linux-x86_64.tar.gz",
+            "path": "bundle/tool-intern2-document-extractor-u2n2j8x5-v{version}-linux-x86_64.tar.gz",
             "entrypoint": "tool-intern2-document-extractor-u2n2j8x5",
             "format": "tar.gz"
           }
@@ -44,5 +44,5 @@
       }
     }
   },
-  "_comment": "Use active=binary for staging/production so apps push registers an installable Executa distribution. For local development, run anna-app apps push --profile local or anna-app dev from the app root. The GitHub Actions anna-app-publish workflow rewrites these URLs to the current repository release tag before push/cut."
+  "_comment": "Use active=binary for staging/production so apps cut directly uploads local binary_artifacts into Anna storage. The artifact paths are relative to this Executa directory, and {version} expands from this file. For local development, run anna-app apps push --profile local or anna-app dev from the app root."
 }
