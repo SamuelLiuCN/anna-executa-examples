@@ -3,13 +3,6 @@ set -euo pipefail
 
 TOOL_ID="${TOOL_ID:-tool-intern2-document-extractor-u2n2j8x5}"
 PLATFORM="${PLATFORM:-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)}"
-VERSION="${VERSION:-$(python - <<'PY'
-import tomllib
-with open("pyproject.toml", "rb") as fh:
-    print(tomllib.load(fh)["project"]["version"])
-PY
-)}"
-
 case "$PLATFORM" in
   darwin-arm64|darwin-x86_64|linux-x86_64) ;;
   darwin-aarch64) PLATFORM="darwin-arm64" ;;
@@ -30,7 +23,7 @@ if [[ ! -x "$BINARY" ]]; then
 fi
 
 STAGE_DIR="dist-anna/${TOOL_ID}-${PLATFORM}"
-ASSET="${TOOL_ID}-v${VERSION}-${PLATFORM}.tar.gz"
+ASSET="${TOOL_ID}-${PLATFORM}.tar.gz"
 
 rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR/bin"
