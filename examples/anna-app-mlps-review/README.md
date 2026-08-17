@@ -1,9 +1,11 @@
 # MLPS Review — Anna App example
 
 Manage companies, MLPS projects, company knowledge bases, and review records.
-Upload `.pdf`, `.docx`, `.txt`, or `.md` documents up to 200 MB, extract text
-through a bundled Python Executa, retrieve relevant company knowledge, and ask
-the host LLM to review the content against MLPS 2.0 / 等保 baseline control
+Upload PDF, Office, text, CSV, and archive documents up to 200 MB. Ordinary
+PDF/DOCX/PPTX/XLSX/XLS files are read through Anna native Agent Session
+`doc_read` / `sheet_read` tools when available; archives and OCR fallback still
+use the bundled Python Executa. The app retrieves relevant company knowledge and
+asks the host LLM to review the content against MLPS 2.0 / 等保 baseline control
 areas.
 
 ## Run locally
@@ -16,6 +18,7 @@ anna-app dev
 Open the printed local harness URL. The bundle calls:
 
 - `anna.tools.invoke({ tool_id, method: "extract_document", args })`
+- `anna.agent.session.catalog()` / `anna.agent.session(...).run({ attachments, allowed_tools })` for native `doc_read` / `sheet_read`
 - `anna.files.upload_init(...)` / browser `PUT` / `anna.files.upload_finalize(...)` for files above 8 MB
 - `anna.files.download_url(...)`, `anna.files.download(...)`, `anna.files.list(...)`, `anna.files.delete(...)`
 - `anna.storage.get(...)` / `anna.storage.set(...)` / `anna.storage.list(...)` / `anna.storage.delete(...)`
@@ -43,6 +46,19 @@ anna-app-mlps-review/
 The staging tool id is `tool-intern2-document-extractor-u2n2j8x5`. During
 `anna-app dev` / publish, Anna writes `bundle/anna-tool-ids.js` with the active
 tool id for the `document-extractor` bundled handle.
+
+## Native document parsing
+
+The app prefers Anna platform parsing for ordinary documents:
+
+- `doc_read`: PDF, DOCX, PPTX attachments.
+- `sheet_read`: XLSX, XLS attachments.
+- TXT/MD/CSV: read directly in the app.
+
+If platform parsing is unavailable, returns empty text, or identifies a scanned
+PDF, the app falls back to the bundled `document-extractor` and records the
+fallback reason in extraction warnings. ZIP/TAR.GZ still use Executa for
+recursive listing and per-entry extraction.
 
 ## Data model
 
@@ -93,7 +109,7 @@ For staging, build and publish with the repository workflow:
 ```
 
 The workflow builds Anna binary archives for the Executa tag
-`document-extractor-v0.1.7`. Each archive contains a `manifest.json` and
+`document-extractor-v0.1.9`. Each archive contains a `manifest.json` and
 `bin/tool-intern2-document-extractor-u2n2j8x5`, matching the official binary
 packaging guide:
 
@@ -110,7 +126,7 @@ If publishing manually, upload equivalent assets first, make sure
 
 ```bash
 anna-app apps push --profile binary
-anna-app apps cut 0.1.7 --changelog "Add app logo and release version sync"
+anna-app apps cut 0.1.9 --changelog "Use native doc_read/sheet_read with Executa fallback"
 ```
 
 OCR still requires the runtime machine to provide the Tesseract executable and

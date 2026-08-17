@@ -15,7 +15,7 @@
     }
   ],
   "optional_executas": [],
-  "system_prompt_addendum": "The user has the MLPS Review app open. It extracts .pdf and .docx text through a bundled document-extractor Executa, then calls anna.llm.complete to review the document against MLPS 2.0 / 等保 baseline controls. Treat results as a review aid, cite only evidence found in the uploaded document, and avoid claiming legal certification.",
+  "system_prompt_addendum": "The user has the MLPS Review app open. It extracts ordinary PDF/DOCX/PPTX/XLSX/XLS files through Anna native Agent Session doc_read/sheet_read tools when available, falls back to the bundled document-extractor Executa for archives and OCR, then calls anna.llm.complete to review the document against MLPS requirements. Treat results as a review aid, cite only evidence found in the uploaded document, and avoid claiming legal certification.",
   "tags": [
     "mlps",
     "compliance",
@@ -78,7 +78,11 @@
       "agent": {
         "session": {
           "auto": true
-        }
+        },
+        "tools": [
+          "doc_read",
+          "sheet_read"
+        ]
       },
       "window": [
         "set_title"

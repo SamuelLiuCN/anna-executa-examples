@@ -14,7 +14,10 @@ import gc
 import hashlib
 import io
 import json
+import platform
 import re
+import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -48,7 +51,7 @@ ARCHIVE_CACHE_DIR = DOWNLOAD_CACHE_DIR / "archives"
 MANIFEST: dict[str, Any] = {
     "name": "tool-intern2-document-extractor-u2n2j8x5",
     "display_name": "Document Extractor",
-    "version": "0.1.8",
+    "version": "0.1.9",
     "description": "Extract plain text from PDF, DOCX, XLSX, CSV, TXT, Markdown, and archive files for MLPS review.",
     "author": "Anna Developer",
     "license": "MIT",
@@ -112,6 +115,13 @@ MANIFEST: dict[str, Any] = {
                     "description": "Maximum extracted text characters to return.",
                     "required": False,
                     "default": DEFAULT_MAX_CHARS,
+                },
+                {
+                    "name": "text_offset",
+                    "type": "integer",
+                    "description": "0-based text offset for chunked extraction. Use next_text_offset until has_more_text is false.",
+                    "required": False,
+                    "default": 0,
                 },
                 {
                     "name": "max_ocr_pages",
@@ -178,11 +188,17 @@ MANIFEST: dict[str, Any] = {
                 {"name": "download_url", "type": "string", "description": "Short-lived HTTPS URL returned by Anna host upload.", "required": False, "default": ""},
                 {"name": "local_path", "type": "string", "description": "Local dev-only path under the user's Downloads directory.", "required": False, "default": ""},
                 {"name": "max_chars", "type": "integer", "description": "Maximum extracted text characters to return.", "required": False, "default": DEFAULT_MAX_CHARS},
+                {"name": "text_offset", "type": "integer", "description": "0-based text offset for chunked extraction. Use next_text_offset until has_more_text is false.", "required": False, "default": 0},
                 {"name": "max_ocr_pages", "type": "integer", "description": "Maximum pages to OCR when a PDF entry has no text layer.", "required": False, "default": DEFAULT_MAX_OCR_PAGES},
                 {"name": "ocr_dpi", "type": "integer", "description": "PDF render DPI used for OCR.", "required": False, "default": DEFAULT_OCR_DPI},
                 {"name": "page_start", "type": "integer", "description": "1-based first PDF page to process.", "required": False, "default": 1},
                 {"name": "page_count", "type": "integer", "description": "Maximum number of PDF pages to process in this call.", "required": False, "default": 0},
             ],
+        },
+        {
+            "name": "diagnose_environment",
+            "description": "Return a small runtime diagnostic report for document extraction and OCR dependencies.",
+            "parameters": [],
         },
     ],
     "runtime": {"type": "uv", "min_version": "0.1.0"},
@@ -758,6 +774,7 @@ def _extract_raw(
     source: bytes | str | Path,
     mime_type: str = "",
     max_chars: int = DEFAULT_MAX_CHARS,
+    text_offset: int = 0,
     max_ocr_pages: int = DEFAULT_MAX_OCR_PAGES,
     ocr_dpi: int = DEFAULT_OCR_DPI,
     page_start: int = 1,
@@ -769,9 +786,12 @@ def _extract_raw(
     source_size = Path(source).stat().st_size if isinstance(source, (str, Path)) else len(source)
     if source_size > MAX_BYTES:
         raise ValueError(f"file exceeds {MAX_BYTES} bytes")
+    max_chars = max(1_000, min(int(max_chars or DEFAULT_MAX_CHARS), DEFAULT_MAX_CHARS))
+    text_offset = max(0, int(text_offset or 0))
+    extraction_char_budget = min(DEFAULT_MAX_CHARS, text_offset + max_chars)
 
     if ext == "pdf":
-        result = _extract_pdf(source, max_chars, max_ocr_pages, ocr_dpi, page_start, page_count)
+        result = _extract_pdf(source, extraction_char_budget, max_ocr_pages, ocr_dpi, page_start, page_count)
     elif ext == "docx":
         if not isinstance(source, bytes):
             source = Path(source).read_bytes()
@@ -789,13 +809,13 @@ def _extract_raw(
             source = Path(source).read_bytes()
         result = _extract_text(source, "md" if ext in {"md", "markdown"} else "txt")
 
-    max_chars = max(1_000, min(int(max_chars or DEFAULT_MAX_CHARS), DEFAULT_MAX_CHARS))
-    text = result["text"]
-    truncated = len(text) > max_chars
-    if truncated:
-        text = text[:max_chars]
+    full_text = result["text"]
+    total_char_count = len(full_text)
+    text = full_text[text_offset:text_offset + max_chars]
+    has_more_text = text_offset + len(text) < total_char_count
+    if has_more_text:
         result["warnings"].append(
-            f"文本超过 {max_chars} 字符，已截断后返回给界面"
+            f"本次返回文本分块 {text_offset}-{text_offset + len(text)} / {total_char_count} 字符"
         )
 
     result.update(
@@ -805,7 +825,11 @@ def _extract_raw(
             "size_bytes": source_size,
             "text": text,
             "char_count": len(text),
-            "truncated": truncated,
+            "total_char_count": total_char_count,
+            "text_offset": text_offset,
+            "next_text_offset": text_offset + len(text) if has_more_text and text else None,
+            "has_more_text": has_more_text,
+            "truncated": has_more_text,
         }
     )
     return result
@@ -813,10 +837,10 @@ def _extract_raw(
 
 def _entry_id(chain: list[str]) -> str:
     raw = json.dumps(chain, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    return hashlib.sha256(raw).hexdigest()[:24]
 
 
-def _entry_chain(entry_id: str) -> list[str]:
+def _legacy_entry_chain(entry_id: str) -> list[str]:
     padded = entry_id + ("=" * (-len(entry_id) % 4))
     try:
         value = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
@@ -825,6 +849,16 @@ def _entry_chain(entry_id: str) -> list[str]:
     if not isinstance(value, list) or not value or not all(isinstance(item, str) and item for item in value):
         raise ValueError("invalid entry_id payload")
     return value
+
+
+def _entry_chain(entry_id: str, archive_name: str, source: bytes | str | Path) -> list[str]:
+    try:
+        return _legacy_entry_chain(entry_id)
+    except ValueError:
+        chain = _find_archive_entry_chain_by_id(archive_name, source, entry_id)
+        if chain:
+            return chain
+        raise ValueError("archive entry_id not found")
 
 
 def _safe_archive_path(name: str) -> str:
@@ -998,6 +1032,66 @@ def _list_archive_source(
         raise ValueError(f"压缩包打开失败：{exc}") from exc
 
 
+def _find_archive_entry_chain_by_id(
+    archive_name: str,
+    source: bytes | str | Path,
+    target_entry_id: str,
+    chain: list[str] | None = None,
+    depth: int = 1,
+) -> list[str] | None:
+    if depth > MAX_ARCHIVE_DEPTH:
+        return None
+    chain = chain or []
+    kind = _archive_kind(archive_name)
+    if not kind:
+        return None
+
+    def consider_member(name: str, size_bytes: int, read_bytes: Any, unsafe: bool = False) -> list[str] | None:
+        safe_name = _safe_archive_path(name)
+        if unsafe or not safe_name or _is_silent_archive_metadata(safe_name):
+            return None
+        if _skip_reason(safe_name, size_bytes):
+            return None
+        child_chain = [*chain, safe_name]
+        if _entry_id(child_chain) == target_entry_id:
+            return child_chain
+        if _archive_kind(safe_name):
+            try:
+                nested = read_bytes()
+            except Exception:  # noqa: BLE001
+                return None
+            return _find_archive_entry_chain_by_id(safe_name, nested, target_entry_id, child_chain, depth + 1)
+        return None
+
+    if kind == "zip":
+        with _open_zip(source) as archive:
+            for info in archive.infolist():
+                if info.is_dir():
+                    continue
+                found = consider_member(
+                    info.filename,
+                    int(info.file_size or 0),
+                    lambda i=info: archive.read(i),
+                    not _safe_archive_path(info.filename),
+                )
+                if found:
+                    return found
+    else:
+        with _open_tar(source) as archive:
+            for member in archive.getmembers():
+                if member.isdir():
+                    continue
+                found = consider_member(
+                    member.name,
+                    int(member.size or 0),
+                    lambda m=member: (archive.extractfile(m).read() if archive.extractfile(m) else b""),
+                    not _safe_archive_path(member.name) or member.issym() or member.islnk() or member.isdev(),
+                )
+                if found:
+                    return found
+    return None
+
+
 def _read_archive_entry_source(
     archive_name: str,
     source: bytes | str | Path,
@@ -1053,6 +1147,7 @@ def tool_extract_document(
     entry_id: str = "",
     mime_type: str = "",
     max_chars: int = DEFAULT_MAX_CHARS,
+    text_offset: int = 0,
     max_ocr_pages: int = DEFAULT_MAX_OCR_PAGES,
     ocr_dpi: int = DEFAULT_OCR_DPI,
     page_start: int = 1,
@@ -1063,7 +1158,7 @@ def tool_extract_document(
         if not _archive_kind(filename):
             raise ValueError("entry_id requires an archive filename")
         source = _load_source(filename, bytes_b64, download_url, local_path, cache_download=True, archive_cache_id=archive_cache_id)
-        chain = _entry_chain(entry_id)
+        chain = _entry_chain(entry_id, filename, source)
         if any(not _safe_archive_path(item) for item in chain):
             raise ValueError("archive entry contains unsafe path")
         entry_name, entry_bytes = _read_archive_entry_source(filename, source, chain)
@@ -1074,6 +1169,7 @@ def tool_extract_document(
             entry_bytes,
             mime_type,
             max_chars,
+            text_offset,
             max_ocr_pages,
             ocr_dpi,
             page_start,
@@ -1098,6 +1194,7 @@ def tool_extract_document(
         source,
         mime_type,
         max_chars,
+        text_offset,
         max_ocr_pages,
         ocr_dpi,
         page_start,
@@ -1184,6 +1281,7 @@ def tool_extract_archive_entry(
     archive_cache_id: str = "",
     mime_type: str = "",
     max_chars: int = DEFAULT_MAX_CHARS,
+    text_offset: int = 0,
     max_ocr_pages: int = DEFAULT_MAX_OCR_PAGES,
     ocr_dpi: int = DEFAULT_OCR_DPI,
     page_start: int = 1,
@@ -1193,7 +1291,7 @@ def tool_extract_archive_entry(
     if not _archive_kind(filename):
         raise ValueError("only .zip, .tar.gz, and .tgz archives are supported")
     source = _load_source(filename, bytes_b64, download_url, local_path, cache_download=True, archive_cache_id=archive_cache_id)
-    chain = _entry_chain(entry_id)
+    chain = _entry_chain(entry_id, filename, source)
     if any(not _safe_archive_path(item) for item in chain):
         raise ValueError("archive entry contains unsafe path")
     entry_name, entry_bytes = _read_archive_entry_source(filename, source, chain)
@@ -1204,6 +1302,7 @@ def tool_extract_archive_entry(
         entry_bytes,
         "",
         max_chars,
+        text_offset,
         max_ocr_pages,
         ocr_dpi,
         page_start,
@@ -1220,11 +1319,73 @@ def tool_extract_archive_entry(
     return result
 
 
+def tool_diagnose_environment() -> dict[str, Any]:
+    tesseract_path = shutil.which("tesseract")
+    tesseract_version = ""
+    tesseract_languages: list[str] = []
+    tesseract_error = ""
+    if tesseract_path:
+        try:
+            version = subprocess.run(
+                [tesseract_path, "--version"],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=5,
+            )
+            tesseract_version = (version.stdout or "").splitlines()[0][:160] if version.stdout else ""
+        except Exception as exc:  # noqa: BLE001
+            tesseract_error = f"tesseract --version failed: {exc}"
+        try:
+            langs = subprocess.run(
+                [tesseract_path, "--list-langs"],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=5,
+            )
+            lines = [line.strip() for line in (langs.stdout or "").splitlines() if line.strip()]
+            tesseract_languages = [line for line in lines if not line.lower().startswith("list of available")]
+        except Exception as exc:  # noqa: BLE001
+            tesseract_error = f"{tesseract_error}; tesseract --list-langs failed: {exc}".strip("; ")
+    else:
+        tesseract_error = "tesseract executable not found in PATH"
+
+    return {
+        "plugin_version": MANIFEST["version"],
+        "python": sys.version.split()[0],
+        "platform": platform.platform(),
+        "executable": sys.executable,
+        "dependencies": {
+            "fitz": getattr(fitz, "__doc__", "available").splitlines()[0][:80] if getattr(fitz, "__doc__", "") else "available",
+            "pytesseract": getattr(pytesseract, "__version__", "available"),
+            "PIL": getattr(Image, "__version__", "available"),
+        },
+        "tesseract": {
+            "available": bool(tesseract_path),
+            "path": tesseract_path or "",
+            "version": tesseract_version,
+            "languages": tesseract_languages[:40],
+            "has_chi_sim": "chi_sim" in tesseract_languages,
+            "error": tesseract_error,
+        },
+        "limits": {
+            "max_bytes": MAX_BYTES,
+            "default_max_chars": DEFAULT_MAX_CHARS,
+            "default_max_ocr_pages": DEFAULT_MAX_OCR_PAGES,
+            "ocr_total_budget_seconds": OCR_TOTAL_BUDGET_SECONDS,
+        },
+    }
+
+
 TOOL_DISPATCH = {
     "extract_document": tool_extract_document,
     "list_archive": tool_list_archive,
     "import_archive_chunk": tool_import_archive_chunk,
     "extract_archive_entry": tool_extract_archive_entry,
+    "diagnose_environment": tool_diagnose_environment,
 }
 
 

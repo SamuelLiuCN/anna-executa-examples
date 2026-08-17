@@ -86,9 +86,9 @@
                   </div>
 
                   <label id="drop-zone" class="drop-zone" for="file-input">
-                    <input id="file-input" type="file" accept=".pdf,.docx,.xlsx,.csv,.txt,.md,.markdown,.zip,.tar.gz,.tgz,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv,text/plain,text/markdown,application/zip,application/gzip,application/x-tar" />
+                    <input id="file-input" type="file" accept=".pdf,.docx,.pptx,.xlsx,.xls,.csv,.txt,.md,.markdown,.zip,.tar.gz,.tgz,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv,text/plain,text/markdown,application/zip,application/gzip,application/x-tar" />
                     <span class="drop-title">选择审查材料</span>
-                    <span id="file-meta" class="drop-meta">PDF / DOCX / XLSX / CSV / TXT / MD / ZIP / TAR.GZ，最大 200 MB</span>
+                    <span id="file-meta" class="drop-meta">PDF / DOCX / PPTX / XLSX / XLS / CSV / TXT / MD / ZIP / TAR.GZ，最大 200 MB</span>
                   </label>
 
                   <div class="controls">
@@ -145,6 +145,7 @@
                     <div><dt>文本</dt><dd id="stat-text">0 字</dd></div>
                     <div><dt>知识</dt><dd id="stat-knowledge">0 条</dd></div>
                     <div><dt>模型</dt><dd id="stat-model">等待</dd></div>
+                    <div><dt>Tesseract</dt><dd id="stat-tesseract">等待检测</dd></div>
                   </dl>
                   <div id="progress-wrap" class="progress-wrap" hidden>
                     <div class="progress-row">
@@ -188,9 +189,9 @@
                   </div>
 
                   <label id="interpret-drop-zone" class="drop-zone" for="interpret-file-input">
-                    <input id="interpret-file-input" type="file" accept=".pdf,.docx,.xlsx,.csv,.txt,.md,.markdown,.zip,.tar.gz,.tgz,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv,text/plain,text/markdown,application/zip,application/gzip,application/x-tar" />
+                    <input id="interpret-file-input" type="file" accept=".pdf,.docx,.pptx,.xlsx,.xls,.csv,.txt,.md,.markdown,.zip,.tar.gz,.tgz,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv,text/plain,text/markdown,application/zip,application/gzip,application/x-tar" />
                     <span class="drop-title">选择第三方测试结果文件</span>
-                    <span id="interpret-file-meta" class="drop-meta">PDF / DOCX / XLSX / CSV / TXT / MD / ZIP / TAR.GZ，最大 200 MB</span>
+                    <span id="interpret-file-meta" class="drop-meta">PDF / DOCX / PPTX / XLSX / XLS / CSV / TXT / MD / ZIP / TAR.GZ，最大 200 MB</span>
                   </label>
 
                   <div class="controls two">
@@ -343,7 +344,7 @@
       </section>
     </div>
 
-    <script src="anna-tool-ids.js?v=20260807-archive-local-path" defer></script>
-    <script src="app.js?v=20260807-archive-local-path" type="module"></script>
+    <script src="anna-tool-ids.js?v=20260817-tesseract-stat" defer></script>
+    <script src="app.js?v=20260817-tesseract-stat" type="module"></script>
   </body>
 </html>

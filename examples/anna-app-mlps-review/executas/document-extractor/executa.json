@@ -1,7 +1,7 @@
 {
   "slug": "document-extractor",
   "name": "Document Extractor",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "executa_type": "tool",
   "description": "Extracts plain text from documents, spreadsheets, and archives for the MLPS Review Anna App.",
   "tool_id": "tool-intern2-document-extractor-u2n2j8x5",
@@ -22,7 +22,8 @@
           "extract_document",
           "list_archive",
           "import_archive_chunk",
-          "extract_archive_entry"
+          "extract_archive_entry",
+          "diagnose_environment"
         ],
         "binary_artifacts": {
           "darwin-arm64": {

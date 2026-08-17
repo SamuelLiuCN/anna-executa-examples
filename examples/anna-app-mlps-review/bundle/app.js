@@ -3,17 +3,13 @@ import { AnnaAppRuntime } from "/static/anna-apps/_sdk/latest/index.js";
 const EXECUTA_HANDLE = "document-extractor";
 const DEV_FALLBACK_TOOL_ID = "tool-intern2-document-extractor-u2n2j8x5";
 const BUNDLED_TOOL_ID = `bundled:${EXECUTA_HANDLE}`;
-const EXECUTA_TOOL_IDS = Array.from(new Set([
-  BUNDLED_TOOL_ID,
-  typeof window !== "undefined" &&
-    window.__ANNA_TOOL_IDS__ &&
-    window.__ANNA_TOOL_IDS__[EXECUTA_HANDLE],
-  DEV_FALLBACK_TOOL_ID,
-].filter(Boolean)));
 const EXECUTA_METHOD = "extract_document";
 const EXECUTA_LIST_ARCHIVE_METHOD = "list_archive";
 const EXECUTA_ARCHIVE_ENTRY_METHOD = "extract_archive_entry";
 const EXECUTA_IMPORT_ARCHIVE_CHUNK_METHOD = "import_archive_chunk";
+const EXECUTA_DIAGNOSE_METHOD = "diagnose_environment";
+const NATIVE_DOC_READ_TOOL = "doc_read";
+const NATIVE_SHEET_READ_TOOL = "sheet_read";
 
 const STORAGE_KEYS = {
   index: "mlps:v1:index",
@@ -24,10 +20,12 @@ const STORAGE_KEYS = {
   interprets: "mlps:v1:interprets",
 };
 
-const INLINE_CAP_BYTES = 8 * 1024 * 1024;
-const ARCHIVE_IMPORT_CHUNK_BYTES = 64 * 1024;
-const ARCHIVE_IMPORT_MIN_CHUNK_BYTES = 16 * 1024;
+const INLINE_CAP_BYTES = 24 * 1024;
+const TOOL_RESPONSE_TEXT_CHARS = 12000;
+const ARCHIVE_IMPORT_CHUNK_BYTES = 16 * 1024;
+const ARCHIVE_IMPORT_MIN_CHUNK_BYTES = 4 * 1024;
 const MAX_FILE_BYTES = 200 * 1024 * 1024;
+const NATIVE_ATTACHMENT_INLINE_CAP_BYTES = 24 * 1024;
 const TOOL_HOST_TIMEOUT_MS = 180000;
 const TOOL_CLIENT_TIMEOUT_MS = 190000;
 const OCR_DPI = 120;
@@ -58,7 +56,7 @@ const INTERPRET_EVIDENCE_OVERLAP_CHARS = 200;
 const INTERPRET_EVIDENCE_MAX_CHUNKS = 260;
 const INTERPRET_CONVERSATION_DIGEST_TRIGGER = 10;
 const TEXT_UPLOAD_TYPE = "text/plain; charset=utf-8";
-const REVIEW_SOURCE_LABEL = "PDF / DOCX / XLSX / CSV / TXT / MD / ZIP / TAR.GZ，最大 200 MB";
+const REVIEW_SOURCE_LABEL = "PDF / DOCX / PPTX / XLSX / XLS / CSV / TXT / MD / ZIP / TAR.GZ，最大 200 MB";
 const KNOWLEDGE_SOURCE_LABEL = "PDF / DOCX / TXT / MD，最大 200 MB";
 
 const CONTROL_TERMS = [
@@ -139,6 +137,7 @@ const els = {
   statText: $("stat-text"),
   statKnowledge: $("stat-knowledge"),
   statModel: $("stat-model"),
+  statTesseract: $("stat-tesseract"),
   progressWrap: $("progress-wrap"),
   progressText: $("progress-text"),
   progressPercent: $("progress-percent"),
@@ -172,6 +171,7 @@ let isSendingInterpretMessage = false;
 const interpretSessions = new Map();
 const localFileStore = new Map();
 let interpretRunId = null;
+let nativeParserCatalogPromise = null;
 
 const appState = {
   index: { selectedCompanyId: null, selectedProjectId: null },
@@ -327,8 +327,19 @@ function isArchiveName(name) {
   return Boolean(archiveKind(name));
 }
 
+function nativeParserToolForFile(name) {
+  const ext = fileExt(name);
+  if (["pdf", "docx", "pptx"].includes(ext)) return NATIVE_DOC_READ_TOOL;
+  if (["xlsx", "xls"].includes(ext)) return NATIVE_SHEET_READ_TOOL;
+  return "";
+}
+
+function isDirectTextName(name) {
+  return ["txt", "md", "markdown", "csv"].includes(fileExt(name));
+}
+
 function localDevDownloadsPath(file) {
-  if (!isLocalDevOrigin() || !isArchiveName(file?.name || "")) return "";
+  if (!isLocalDevOrigin() || !file?.name) return "";
   return `/Users/samuel/Downloads/${file.name}`;
 }
 
@@ -342,7 +353,7 @@ function basename(path) {
 }
 
 function isSupported(file) {
-  return isArchiveName(file.name) || ["pdf", "docx", "xlsx", "csv", "txt", "md", "markdown"].includes(fileExt(file.name));
+  return isArchiveName(file.name) || ["pdf", "docx", "pptx", "xlsx", "xls", "csv", "txt", "md", "markdown"].includes(fileExt(file.name));
 }
 
 function formatError(label, err) {
@@ -551,11 +562,87 @@ async function readStorage(key, fallback) {
   }
 }
 
+function compactStringForStorage(value, maxChars = 4000) {
+  const text = String(value || "");
+  return text.length > maxChars ? `${text.slice(0, maxChars)}\n...[已截断用于索引存储]` : text;
+}
+
+function compactListForStorage(items, limit = 20) {
+  return (Array.isArray(items) ? items : []).slice(0, limit).map((item) => ({
+    path: item.path || item.filename || "",
+    kind: item.kind || "",
+    reason: item.reason || "",
+    char_count: item.char_count || null,
+    page_count: item.page_count || null,
+    processed_page_count: item.processed_page_count || null,
+  }));
+}
+
+function slimArchiveForStorage(archive) {
+  if (!archive) return null;
+  return {
+    kind: archive.kind || "",
+    fileCount: archive.fileCount || 0,
+    processedFileCount: archive.processedFileCount || 0,
+    entries: compactListForStorage(archive.entries, 20),
+    skipped: compactListForStorage(archive.skipped, 20),
+    entriesTruncated: (archive.entries || []).length > 20,
+    skippedTruncated: (archive.skipped || []).length > 20,
+  };
+}
+
+function slimExtractionMetaForStorage(meta) {
+  if (!meta) return meta;
+  return {
+    ...meta,
+    warnings: (meta.warnings || []).slice(0, 20).map((warning) => compactStringForStorage(warning, 800)),
+    entries: compactListForStorage(meta.entries, 20),
+    skipped: compactListForStorage(meta.skipped, 20),
+    entriesTruncated: (meta.entries || []).length > 20,
+    skippedTruncated: (meta.skipped || []).length > 20,
+  };
+}
+
+function slimReviewRecordForStorage(record) {
+  const {
+    report,
+    analysis,
+    extractedText,
+    evidenceIndexCache,
+    ...rest
+  } = record;
+  return {
+    ...rest,
+    failureReason: compactStringForStorage(rest.failureReason, 4000),
+    sourceArchive: slimArchiveForStorage(rest.sourceArchive),
+    extractionMeta: slimExtractionMetaForStorage(rest.extractionMeta),
+    knowledgeRefs: (rest.knowledgeRefs || []).slice(0, 12).map((item) => ({
+      id: item.id,
+      title: item.title,
+      score: item.score,
+    })),
+  };
+}
+
+function slimInterpretRecordForStorage(record) {
+  const { analysis, evidenceIndexCache, ...rest } = record;
+  return {
+    ...rest,
+    sourceArchive: slimArchiveForStorage(rest.sourceArchive),
+    messages: (rest.messages || []).slice(-MAX_INTERPRET_RECENT_MESSAGES).map((message) => ({
+      ...message,
+      content: compactStringForStorage(message.content, 3000),
+    })),
+  };
+}
+
 async function saveStateSlice(name) {
   const value =
     name === "interprets"
-      ? appState.interprets.map(({ analysis, evidenceIndexCache, ...record }) => record)
-      : appState[name];
+      ? appState.interprets.map(slimInterpretRecordForStorage)
+      : name === "reviews"
+        ? appState.reviews.map(slimReviewRecordForStorage)
+        : appState[name];
   await anna.storage.set({
     key: STORAGE_KEYS[name],
     value: JSON.stringify(value),
@@ -1050,7 +1137,6 @@ function renderModal() {
           ${payload.extracted ? `<h4 class="modal-subtitle">抽取文本节选</h4>${viewOutput(payload.extracted.slice(0, 12000))}` : ""}
         `;
     els.modalFooter.innerHTML = `
-      <button class="ghost compact-action" type="button" data-modal-action="share-report" ${payload.report ? "" : "disabled"}>发送到对话继续整改</button>
       <button class="ghost compact-action" type="button" data-modal-action="rerun-record" ${reviewIsRunning(record) ? "disabled" : ""}>重新审查</button>
       <button class="ghost compact-action" type="button" data-modal-action="download-source" ${record?.sourceFilePath ? "" : "disabled"}>下载源文件</button>
       <button class="ghost compact-action" type="button" data-modal-action="download-record" ${reviewReportPath(record) ? "" : "disabled"}>下载报告</button>
@@ -1184,6 +1270,7 @@ function selectFile(file) {
     els.statText.textContent = "0 字";
     els.statKnowledge.textContent = "0 条";
     els.statModel.textContent = "等待";
+    if (els.statTesseract) els.statTesseract.textContent = "等待检测";
     setReportPlain(currentProject() ? "等待上传文档。" : "请先创建公司和项目。");
     els.text.textContent = "尚无抽取文本。";
     updateActionState();
@@ -1195,6 +1282,7 @@ function selectFile(file) {
   els.statText.textContent = "等待抽取";
   els.statKnowledge.textContent = "等待";
   els.statModel.textContent = "等待";
+  if (els.statTesseract) els.statTesseract.textContent = "等待检测";
 
   if (!isSupported(selectedFile)) {
     setReportPlain("仅支持 .pdf、.docx、.xlsx、.csv、.txt、.md、.zip、.tar.gz、.tgz 文件。");
@@ -1444,7 +1532,7 @@ async function uploadFileToPath(runtime, file, path, contentType) {
   } catch (err) {
     if (!isNotImplementedError(err)) throw err;
     if (file.size > INLINE_CAP_BYTES) {
-      throw new Error(`当前是本地 legacy 模式，不支持 ${formatBytes(file.size)} 的大文件上传。请切换到 APS / staging，或使用 8MB 以内的小文件调试。`);
+      throw new Error(`当前是本地 legacy 模式，不支持 ${formatBytes(file.size)} 的大文件上传。请切换到 APS / staging，或使用 ${formatBytes(INLINE_CAP_BYTES)} 以内的小文件调试。`);
     }
     localFileStore.set(path, {
       file,
@@ -1644,6 +1732,68 @@ async function readTextFile(runtime, path) {
   return resp.text();
 }
 
+async function readSourceArrayBuffer(runtime, file, source) {
+  if (file instanceof Blob) return file.arrayBuffer();
+  if (source?.storagePath && localFileStore.has(source.storagePath)) {
+    const item = localFileStore.get(source.storagePath);
+    if (item.file instanceof Blob) return item.file.arrayBuffer();
+    if (item.bytes) return item.bytes.buffer.slice(item.bytes.byteOffset, item.bytes.byteOffset + item.bytes.byteLength);
+    if (typeof item.text === "string") return new TextEncoder().encode(item.text).buffer;
+  }
+  if (source?.args?.bytes_b64) {
+    const binary = atob(source.args.bytes_b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return bytes.buffer;
+  }
+  if (source?.storagePath) {
+    const link = await runtime.files.download_url({ path: source.storagePath });
+    const url = link.get_url || link.url || link.download_url;
+    if (!url) throw new Error(`files.download_url 未返回可读取链接，返回字段：${Object.keys(link || {}).join(", ")}`);
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`读取文件失败：HTTP ${resp.status}`);
+    return resp.arrayBuffer();
+  }
+  throw new Error("缺少可读取的文件来源");
+}
+
+async function extractDirectTextDocument(runtime, file, source) {
+  const ext = fileExt(file.name);
+  setProgress(`正在读取 ${ext.toUpperCase()} 文本`, null);
+  const buffer = await readSourceArrayBuffer(runtime, file, source);
+  const bytes = new Uint8Array(buffer);
+  const encodings = ext === "csv"
+    ? [{ name: "utf-8", fatal: true }, { name: "gb18030", fatal: true }, { name: "utf-8", fatal: false }]
+    : [{ name: "utf-8", fatal: true }, { name: "gb18030", fatal: true }, { name: "utf-8", fatal: false }];
+  let text = "";
+  let usedEncoding = encodings[0].name;
+  let lastError = null;
+  for (const encoding of encodings) {
+    try {
+      text = new TextDecoder(encoding.name, { fatal: encoding.fatal }).decode(bytes);
+      usedEncoding = encoding.name;
+      break;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  if (!text && lastError) throw lastError;
+  text = text.replace(/^\uFEFF/, "");
+  const truncated = text.length > MAX_EXTRACT_CHARS;
+  if (truncated) text = text.slice(0, MAX_EXTRACT_CHARS);
+  return {
+    kind: ext,
+    filename: file.name,
+    mime_type: source.contentType,
+    size_bytes: file.size || bytes.byteLength,
+    text,
+    char_count: text.length,
+    line_count: text ? text.split(/\r\n?|\n/).length : 0,
+    truncated,
+    warnings: [`前端直接读取 ${ext.toUpperCase()} 文本${usedEncoding ? `（${usedEncoding}）` : ""}`],
+  };
+}
+
 async function deleteFileQuietly(runtime, path) {
   if (!path) return;
   if (localFileStore.has(path)) {
@@ -1679,9 +1829,20 @@ async function downloadLocalFile(path, filename) {
   }
 }
 
+function executaToolIds() {
+  const mappedToolId = typeof window !== "undefined"
+    ? window.__ANNA_TOOL_IDS__?.[EXECUTA_HANDLE]
+    : "";
+  return Array.from(new Set([
+    mappedToolId,
+    DEV_FALLBACK_TOOL_ID,
+    BUNDLED_TOOL_ID,
+  ].filter(Boolean)));
+}
+
 async function invokeExtractor(runtime, args, method = EXECUTA_METHOD) {
   let lastError = null;
-  for (const toolId of EXECUTA_TOOL_IDS) {
+  for (const toolId of executaToolIds()) {
     try {
       const reply = await runtime.tools.invoke({
         tool_id: toolId,
@@ -1719,6 +1880,90 @@ function emptyExtractionMessage(extraction) {
   return `未抽取到可分析文本，请检查文档是否为扫描件或图片型 PDF。${ocrHint}${warningText}`;
 }
 
+function shouldRunExtractionDiagnostics(err, activeStep) {
+  const stage = err?.failureStage || activeStep?.dataset?.step || "";
+  const message = errorMessage(err);
+  return (
+    stage === "extract" ||
+    /抽取|OCR|Tesseract|document-extractor|doc_read|sheet_read|tool|executa|bridge|PDF|DOCX|XLSX|archive|压缩包/i.test(message)
+  );
+}
+
+function formatCatalogDiagnostic(catalog) {
+  if (!catalog) return ["Agent catalog：当前运行时未提供 agent.session.catalog"];
+  if (catalog.error) return [`Agent catalog：读取失败：${errorMessage(catalog.error)}`];
+  const tools = ["doc_read", "sheet_read"].map((name) => {
+    const item = (catalog.platform_tools || []).find((tool) => tool.name === name);
+    if (!item) return `${name}: 不在 catalog 中`;
+    if (item.eligible) return `${name}: eligible`;
+    const blocked = Array.isArray(item.blocked_by) ? item.blocked_by.join("/") : item.blocked_by || "unknown";
+    return `${name}: blocked_by=${blocked}`;
+  });
+  return [
+    `Agent inherit_host_tools_granted: ${catalog.inherit_host_tools_granted ? "yes" : "no"}`,
+    ...tools,
+  ];
+}
+
+function formatExtractorDiagnostic(diag) {
+  if (!diag) return ["document-extractor：未返回诊断信息"];
+  if (diag.error) return [`document-extractor：诊断失败：${diag.error}`];
+  const tesseract = diag.tesseract || {};
+  return [
+    `document-extractor: available, version=${diag.plugin_version || "-"}`,
+    `Python: ${diag.python || "-"} (${diag.platform || "-"})`,
+    `PyMuPDF: ${diag.dependencies?.fitz || "-"}`,
+    `pytesseract: ${diag.dependencies?.pytesseract || "-"}`,
+    `Tesseract: ${tesseract.available ? "available" : "missing"}${tesseract.path ? ` (${tesseract.path})` : ""}`,
+    tesseract.version ? `Tesseract version: ${tesseract.version}` : "",
+    `chi_sim: ${tesseract.has_chi_sim ? "installed" : "missing"}`,
+    tesseract.error ? `Tesseract error: ${tesseract.error}` : "",
+  ].filter(Boolean);
+}
+
+function formatTesseractStat(diag) {
+  const tesseract = diag?.tesseract || {};
+  if (!diag || diag.error) return "诊断失败";
+  if (!tesseract.available) return "缺失";
+  return tesseract.has_chi_sim ? "可用（chi_sim）" : "可用（缺 chi_sim）";
+}
+
+async function refreshTesseractStat(runtime) {
+  if (!els.statTesseract) return null;
+  els.statTesseract.textContent = "检测中";
+  try {
+    const diag = await invokeExtractor(runtime, {}, EXECUTA_DIAGNOSE_METHOD);
+    els.statTesseract.textContent = formatTesseractStat(diag);
+    return diag;
+  } catch (err) {
+    els.statTesseract.textContent = `诊断失败：${errorMessage(err)}`;
+    return { error: errorMessage(err) };
+  }
+}
+
+async function diagnoseExtractionEnvironment(runtime) {
+  const lines = ["", "运行环境诊断："];
+  const catalog = await nativeParserCatalog(runtime).catch((err) => ({ error: err }));
+  lines.push(...formatCatalogDiagnostic(catalog).map((line) => `- ${line}`));
+  try {
+    const diag = await invokeExtractor(runtime, {}, EXECUTA_DIAGNOSE_METHOD);
+    lines.push(...formatExtractorDiagnostic(diag).map((line) => `- ${line}`));
+  } catch (err) {
+    lines.push(`- document-extractor：诊断调用失败：${errorMessage(err)}`);
+  }
+  return lines.join("\n");
+}
+
+async function errorWithExtractionDiagnostics(runtime, err, activeStep) {
+  if (!shouldRunExtractionDiagnostics(err, activeStep)) return errorMessage(err);
+  try {
+    setProgress("抽取失败，正在读取运行环境诊断", null);
+    return `${errorMessage(err)}\n${await diagnoseExtractionEnvironment(runtime)}`;
+  } catch (diagErr) {
+    return `${errorMessage(err)}\n\n运行环境诊断失败：${errorMessage(diagErr)}`;
+  }
+}
+
 function archiveScanSummary(listing) {
   const entries = Array.isArray(listing.entries) ? listing.entries : [];
   const skipped = Array.isArray(listing.skipped) ? listing.skipped : [];
@@ -1746,7 +1991,9 @@ async function sourceArgs(runtime, source) {
   if (localFileStore.has(source.storagePath)) {
     const item = localFileStore.get(source.storagePath);
     if (item.size && item.size > INLINE_CAP_BYTES) {
-      throw new Error(`本地 legacy 模式只支持 8MB 以内的文件内联传输：${basename(source.storagePath)}`);
+      const localPath = localDevDownloadsPath({ name: item.filename || source.filename || basename(source.storagePath) });
+      if (localPath) return { local_path: localPath };
+      throw new Error(`本地 legacy 模式只支持 ${formatBytes(INLINE_CAP_BYTES)} 以内的文件内联传输：${basename(source.storagePath)}`);
     }
     if (item.file instanceof Blob) return { bytes_b64: await readBlobAsBase64(item.file) };
     if (item.bytes) return { bytes_b64: btoa(String.fromCharCode(...item.bytes)) };
@@ -1760,6 +2007,131 @@ async function sourceArgs(runtime, source) {
     throw new Error(`files.download_url 未返回 get_url/url，返回字段：${Object.keys(link || {}).join(", ")}`);
   }
   return { download_url: downloadUrl };
+}
+
+async function nativeParserCatalog(runtime) {
+  if (!runtime.agent?.session?.catalog) return null;
+  if (!nativeParserCatalogPromise) {
+    nativeParserCatalogPromise = runtime.agent.session.catalog().catch((err) => ({ error: err }));
+  }
+  return nativeParserCatalogPromise;
+}
+
+async function isNativeParserEligible(runtime, toolName) {
+  const catalog = await nativeParserCatalog(runtime);
+  if (!catalog) return { eligible: false, reason: "当前 Anna 运行时未提供 agent.session.catalog" };
+  if (catalog.error) return { eligible: false, reason: `agent.session.catalog 不可用：${errorMessage(catalog.error)}` };
+  const tool = (catalog.platform_tools || []).find((item) => item.name === toolName);
+  if (!tool) return { eligible: false, reason: `平台工具 ${toolName} 不在 catalog 中` };
+  if (!tool.eligible) {
+    const blocked = Array.isArray(tool.blocked_by) ? tool.blocked_by.join("/") : tool.blocked_by || "unknown";
+    return { eligible: false, reason: `平台工具 ${toolName} 不可用：${blocked}` };
+  }
+  return { eligible: true, reason: "" };
+}
+
+async function nativeParserAttachment(runtime, file, source) {
+  if (source?.storagePath && !localFileStore.get(source.storagePath)?.transient) {
+    const link = await runtime.files.download_url({ path: source.storagePath });
+    const url = link.get_url || link.url || link.download_url;
+    if (!url) throw new Error(`files.download_url 未返回附件链接，返回字段：${Object.keys(link || {}).join(", ")}`);
+    return { type: source.contentType || guessMime(file.name), url, filename: file.name };
+  }
+  const size = Number(file.size || localFileStore.get(source?.storagePath)?.size || 0);
+  if (size > NATIVE_ATTACHMENT_INLINE_CAP_BYTES) {
+    throw new Error(`原生解析需要可下载 URL；当前本地内联附件超过 ${formatBytes(NATIVE_ATTACHMENT_INLINE_CAP_BYTES)}`);
+  }
+  const buffer = await readSourceArrayBuffer(runtime, file, source);
+  const blob = new Blob([buffer], { type: source.contentType || guessMime(file.name) });
+  const b64 = await readBlobAsBase64(blob);
+  return {
+    type: source.contentType || guessMime(file.name),
+    data: `data:${source.contentType || guessMime(file.name)};base64,${b64}`,
+    filename: file.name,
+  };
+}
+
+function nativeParserPrompt(file, toolName, processPageLimit) {
+  const pageLimitLine = toolName === NATIVE_DOC_READ_TOOL && fileExt(file.name) === "pdf"
+    ? `PDF 页数上限：优先读取前 ${processPageLimit} 页；如果工具不能限制页数，请仍然返回可读取的正文并标明实际覆盖范围。`
+    : "";
+  return compactText(`请使用本轮允许的平台工具 ${toolName} 读取附件内容，并只输出可用于后续等保审查的纯文本。
+
+文件名：${file.name}
+${pageLimitLine}
+
+输出要求：
+- 不要做合规审查，不要给整改建议，只提取/整理附件正文。
+- PDF/PPTX/DOCX 需尽量保留页码、幻灯片编号或段落定位；表格文件需保留工作表名、行列或 A1 范围。
+- 用 Markdown 文本输出，页面建议用 “--- 第 N 页 ---”，工作表建议用 “### 工作表：SheetName”。
+- 如果附件是扫描件、图片型 PDF、无法解析或没有可分析正文，只输出一行：SCANNED_OR_EMPTY: <原因>。`, 3000);
+}
+
+function nativeParserTextLooksEmpty(text) {
+  const value = String(text || "").trim();
+  if (!value) return true;
+  if (/^SCANNED_OR_EMPTY\s*:/i.test(value)) return true;
+  if (/扫描件|图片型\s*PDF|无法读取|无法解析|不能读取|没有正文|未识别|no text|empty document|unable to extract|cannot extract/i.test(value) && value.length < 800) return true;
+  return false;
+}
+
+async function runNativeParser(runtime, file, source, toolName, processPageLimit) {
+  if (!runtime.agent?.session) throw new Error("当前 Anna 运行时未提供 agent.session");
+  const eligibility = await isNativeParserEligible(runtime, toolName);
+  if (!eligibility.eligible) throw new Error(eligibility.reason);
+
+  setProgress(`正在使用 Anna 原生 ${toolName} 解析 ${file.name}`, null);
+  const session = await runtime.agent.session({
+    submode: "auto",
+    system_prompt: "你是附件读取器。你只能读取用户提供的附件并输出可追溯的纯文本，不做业务分析。",
+    quotaCaps: { inherit_host_tools: false, allowed_tools: [toolName] },
+  });
+  const attachment = await nativeParserAttachment(runtime, file, source);
+  const stream = session.run({
+    content: nativeParserPrompt(file, toolName, processPageLimit),
+    attachments: [attachment],
+    allowed_tools: [toolName],
+  });
+  let text = "";
+  for await (const frame of stream) {
+    if (frame.event === "error") throw new Error(frame.message || "agent session error");
+    if (frame.event === "run_meta" && Array.isArray(frame.granted_tools) && !frame.granted_tools.includes(toolName)) {
+      throw new Error(`本轮 Agent Session 未授予 ${toolName}`);
+    }
+    const delta = extractAgentFrameText(frame);
+    if (delta) {
+      text += delta;
+      if (text.length % 1200 < delta.length) setProgress(`Anna 原生 ${toolName} 正在返回解析文本：${text.length.toLocaleString("zh-CN")} 字`, null);
+    }
+  }
+  text = String(text || "").trim();
+  if (nativeParserTextLooksEmpty(text)) throw new Error(text || `${toolName} 未返回可分析文本`);
+  const truncated = text.length > MAX_EXTRACT_CHARS;
+  if (truncated) text = text.slice(0, MAX_EXTRACT_CHARS);
+  finishProgress(`Anna 原生 ${toolName} 解析完成`);
+  return {
+    kind: fileExt(file.name) || toolName,
+    filename: file.name,
+    mime_type: source.contentType,
+    size_bytes: file.size || null,
+    text,
+    char_count: text.length,
+    page_count: null,
+    processed_page_count: null,
+    truncated,
+    warnings: [`Anna 原生 ${toolName} 解析完成`],
+  };
+}
+
+async function tryNativeDocumentExtraction(runtime, file, source, processPageLimit) {
+  const toolName = nativeParserToolForFile(file.name);
+  if (!toolName) return null;
+  try {
+    return await runNativeParser(runtime, file, source, toolName, processPageLimit);
+  } catch (err) {
+    setProgress(`Anna 原生 ${toolName} 不可用，正在改用 Executa 兜底`, null);
+    return { fallbackReason: errorMessage(err), toolName };
+  }
 }
 
 async function importLocalArchiveToExtractorCache(runtime, file) {
@@ -1825,13 +2197,64 @@ async function archiveSourceArgs(runtime, file, source) {
   return sourceArgs(runtime, source);
 }
 
-function storedSource(contentType, storagePath) {
-  return { contentType, storagePath };
+async function extractDocumentInTextChunks(runtime, file, source, baseArgs = {}, options = {}) {
+  const displayName = options.displayName || file.name;
+  const maxCharsBudget = Math.max(1000, Number(options.maxCharsBudget || MAX_EXTRACT_CHARS));
+  const chunks = [];
+  const warnings = [];
+  let offset = 0;
+  let totalChars = 0;
+  let resultMeta = null;
+  let part = 1;
+  let hasMoreText = false;
+
+  while (totalChars < maxCharsBudget) {
+    const limit = Math.min(TOOL_RESPONSE_TEXT_CHARS, maxCharsBudget - totalChars);
+    setProgress(`${displayName} 正在分块抽取文本 ${part}`, null);
+    const sourcePayload = options.sourceArgs || await sourceArgs(runtime, source);
+    const result = await invokeExtractor(runtime, {
+      filename: file.name,
+      mime_type: source.contentType,
+      ...sourcePayload,
+      ...baseArgs,
+      max_chars: limit,
+      text_offset: offset,
+    }, EXECUTA_METHOD);
+    resultMeta = resultMeta || result;
+    const text = result.text || "";
+    if (text) {
+      chunks.push(text);
+      totalChars += text.length;
+    }
+    if (Array.isArray(result.warnings)) warnings.push(...result.warnings);
+    const nextOffset = Number(result.next_text_offset || 0);
+    const hasMore = Boolean(result.has_more_text || nextOffset > offset + text.length);
+    hasMoreText = hasMore;
+    if (!text || !hasMore || !nextOffset || nextOffset <= offset) break;
+    offset = nextOffset;
+    part += 1;
+  }
+
+  const text = chunks.join("\n\n");
+  const truncated = Boolean(hasMoreText || totalChars >= maxCharsBudget);
+  return {
+    ...(resultMeta || {}),
+    filename: options.resultFilename || resultMeta?.filename || displayName,
+    text,
+    char_count: text.length,
+    truncated,
+    warnings: Array.from(new Set(warnings)),
+  };
+}
+
+function storedSource(contentType, storagePath, filename = "") {
+  return { contentType, storagePath, filename };
 }
 
 async function inlineSource(file, contentType) {
   return {
     contentType,
+    filename: file.name,
     args: { bytes_b64: await readBlobAsBase64(file) },
   };
 }
@@ -1840,16 +2263,23 @@ async function extractStoredDocument(runtime, file, source, processPageLimit = s
   if (isArchiveName(file.name)) {
     return extractArchiveInEntries(runtime, file, source, processPageLimit);
   }
+  if (isDirectTextName(file.name)) {
+    return extractDirectTextDocument(runtime, file, source);
+  }
+  const nativeResult = await tryNativeDocumentExtraction(runtime, file, source, processPageLimit);
+  if (nativeResult && !nativeResult.fallbackReason) return nativeResult;
+  const fallbackWarning = nativeResult?.fallbackReason
+    ? [`Anna 原生 ${nativeResult.toolName} 解析未完成，已改用 Executa 兜底：${nativeResult.fallbackReason}`]
+    : [];
   if (fileExt(file.name) === "pdf") {
-    return extractPdfInBatches(runtime, file, source, processPageLimit);
+    const result = await extractPdfInBatches(runtime, file, source, processPageLimit);
+    result.warnings = [...fallbackWarning, ...(result.warnings || [])];
+    return result;
   }
   setProgress(`正在抽取 ${fileExt(file.name).toUpperCase()} 文本`, null);
-  return invokeExtractor(runtime, {
-    filename: file.name,
-    mime_type: source.contentType,
-    ...(await sourceArgs(runtime, source)),
-    max_chars: MAX_EXTRACT_CHARS,
-  });
+  const result = await extractDocumentInTextChunks(runtime, file, source);
+  result.warnings = [...fallbackWarning, ...(result.warnings || [])];
+  return result;
 }
 
 async function extractArchiveInEntries(runtime, file, source, processPageLimit) {
@@ -1940,13 +2370,18 @@ async function extractArchiveInEntries(runtime, file, source, processPageLimit) 
           },
         );
       } else {
-        result = await invokeExtractor(runtime, {
-          filename: file.name,
-          mime_type: source.contentType,
-          ...archiveEntryArgs,
-          entry_id: entry.entry_id,
-          max_chars: remainingChars,
-        }, EXECUTA_METHOD);
+        result = await extractDocumentInTextChunks(
+          runtime,
+          file,
+          source,
+          { entry_id: entry.entry_id },
+          {
+            displayName: entryLabel,
+            resultFilename: entryLabel,
+            maxCharsBudget: remainingChars,
+            sourceArgs: archiveEntryArgs,
+          },
+        );
       }
     } catch (err) {
       warnings.push(`${entryLabel} 抽取失败，已跳过：${errorMessage(err)}`);
@@ -2062,17 +2497,35 @@ async function extractPdfInBatches(runtime, file, source, processPageLimit, meth
 
     let result;
     try {
-      result = await invokeExtractor(runtime, {
-        filename: file.name,
-        mime_type: source.contentType,
-        ...(await sourceArgs(runtime, source)),
-        ...extraArgs,
-        max_chars: Math.max(1000, maxCharsBudget - totalChars),
-        max_ocr_pages: batchPages,
-        ocr_dpi: OCR_DPI,
-        page_start: nextPage,
-        page_count: batchPages,
-      }, method);
+      let textOffset = 0;
+      let batchText = "";
+      const batchWarnings = [];
+      while (totalChars + batchText.length < maxCharsBudget) {
+        const part = await invokeExtractor(runtime, {
+          filename: file.name,
+          mime_type: source.contentType,
+          ...(await sourceArgs(runtime, source)),
+          ...extraArgs,
+          max_chars: Math.min(TOOL_RESPONSE_TEXT_CHARS, Math.max(1000, maxCharsBudget - totalChars - batchText.length)),
+          text_offset: textOffset,
+          max_ocr_pages: batchPages,
+          ocr_dpi: OCR_DPI,
+          page_start: nextPage,
+          page_count: batchPages,
+        }, method);
+        result = result || part;
+        if (part.text) batchText += `${batchText ? "\n\n" : ""}${part.text}`;
+        if (Array.isArray(part.warnings)) batchWarnings.push(...part.warnings);
+        if (!part.has_more_text || !part.next_text_offset || part.next_text_offset <= textOffset || !part.text) break;
+        textOffset = part.next_text_offset;
+        setProgress(`${displayName} 第 ${nextPage}-${endLabel} 页正在分块返回文本：${batchText.length.toLocaleString("zh-CN")} 字`, beforePercent);
+      }
+      result = {
+        ...(result || {}),
+        text: batchText,
+        char_count: batchText.length,
+        warnings: Array.from(new Set(batchWarnings)),
+      };
     } catch (err) {
       if (isRecoverableExtractorError(err) && batchPages > MIN_PAGES_PER_TOOL_CALL) {
         currentBatchSize = Math.max(MIN_PAGES_PER_TOOL_CALL, Math.floor(batchPages / 2));
@@ -2501,12 +2954,13 @@ async function saveReviewAnalysisCheckpoint(runtime, record, partialReports, fin
   await updateReviewRecord(record, {
     partialReportsPath,
     findingsDigestPath,
+    analysisCheckpointAvailable: true,
     lastCheckpoint: "partials",
   });
 }
 
 async function loadReviewAnalysisCheckpoint(runtime, record) {
-  if (!record?.partialReportsPath || !record?.findingsDigestPath) {
+  if (!record?.analysisCheckpointAvailable || !record?.partialReportsPath || !record?.findingsDigestPath) {
     return null;
   }
   try {
@@ -3314,6 +3768,7 @@ function makeReviewRecord({ id, company, project, filename, contentType, size, s
     reportDraftPath: `${basePath}/report-draft.md`,
     partialReportsPath: `${basePath}/partials.md`,
     findingsDigestPath: `${basePath}/findings.md`,
+    analysisCheckpointAvailable: false,
     status,
     completionState: "running",
     processedPages: null,
@@ -3342,7 +3797,7 @@ function sourceForRecord(record) {
   };
   return {
     fileLike,
-    source: storedSource(record.sourceMimeType || guessMime(fileLike.name), record.sourceFilePath),
+    source: storedSource(record.sourceMimeType || guessMime(fileLike.name), record.sourceFilePath, fileLike.name),
   };
 }
 
@@ -3406,6 +3861,7 @@ async function runReviewWorkflow({ runtime, record, file, sourceFilePath, conten
   els.text.textContent = "";
   els.statModel.textContent = "等待";
   els.statName.textContent = activeReviewParams.filename;
+  if (els.statTesseract) els.statTesseract.textContent = "检测中";
   await updateReviewRecord(record, {
     status: "运行中",
     completionState: "running",
@@ -3415,10 +3871,12 @@ async function runReviewWorkflow({ runtime, record, file, sourceFilePath, conten
     failureStage: "",
     failureReason: "",
     llmFinishReason: "",
+    analysisCheckpointAvailable: Boolean(reuseCheckpoints && record.analysisCheckpointAvailable),
   });
 
   try {
     markStep("extract", "active");
+    await refreshTesseractStat(runtime);
     let source;
     let fileLike = file;
     if (reuseCheckpoints && record.extractedTextPath && record.extractionMeta) {
@@ -3436,7 +3894,7 @@ async function runReviewWorkflow({ runtime, record, file, sourceFilePath, conten
       source =
         file.size <= INLINE_CAP_BYTES
           ? await inlineSource(file, contentType)
-          : storedSource(contentType, sourceFilePath);
+          : storedSource(contentType, sourceFilePath, file.name);
       await updateReviewRecord(record, { sourceFilePath, lastCheckpoint: "source" });
     } else {
       const fromRecord = sourceForRecord(record);
@@ -3451,6 +3909,7 @@ async function runReviewWorkflow({ runtime, record, file, sourceFilePath, conten
   } catch (err) {
     const active = document.querySelector("#steps li.active");
     if (active) active.classList.add("error");
+    const failureReason = await errorWithExtractionDiagnostics(runtime, err, active);
     const draftPath = err.partialReport
       ? await writeTextFile(runtime, record.reportDraftPath, err.partialReport).catch(() => record.reportDraftPath)
       : record.reportDraftPath;
@@ -3461,11 +3920,11 @@ async function runReviewWorkflow({ runtime, record, file, sourceFilePath, conten
       reportDraftPath: err.partialReport ? draftPath : record.reportDraftPath,
       reportDraftAvailable: Boolean(err.partialReport),
       failureStage: err.failureStage || active?.dataset?.step || "analysis",
-      failureReason: errorMessage(err),
+      failureReason,
       llmFinishReason: err.llmFinishReason || "",
       maxRetries: REVIEW_MAX_RETRIES,
     });
-    setReportPlain(formatError("analysis", err));
+    setReportPlain(`[analysis] error: ${failureReason}`);
     setProgress("审查失败，已保留记录，可手动重新审查", null);
     selectedRecordId = record.id;
     renderRecordList();
@@ -3582,7 +4041,7 @@ async function runInterpretation() {
     const source =
       file.size <= INLINE_CAP_BYTES
         ? await inlineSource(file, contentType)
-        : storedSource(contentType, sourceFilePath);
+        : storedSource(contentType, sourceFilePath, file.name);
     const extraction = await extractStoredDocument(runtime, file, source, selectedInterpretPages());
     markStep("extract", "done", "interpret");
 
@@ -3702,7 +4161,8 @@ async function runInterpretation() {
   } catch (err) {
     const active = document.querySelector("#interpret-steps li.active");
     if (active) active.classList.add("error");
-    els.interpretReport.textContent = formatError("interpret", err);
+    const failureReason = await errorWithExtractionDiagnostics(runtime, err, active);
+    els.interpretReport.textContent = `[interpret] error: ${failureReason}`;
   } finally {
     activeWorkstream = "review";
     setBusy(false);
@@ -3726,7 +4186,7 @@ async function uploadKnowledge() {
     const source =
       file.size <= INLINE_CAP_BYTES
         ? await inlineSource(file, contentType)
-        : storedSource(contentType, sourceFilePath);
+        : storedSource(contentType, sourceFilePath, file.name);
     const extraction = await extractStoredDocument(runtime, file, source, MAX_PROCESS_PAGES);
     const text = extraction.text || "";
     if (!text.trim()) throw new Error("知识库文档未抽取到文本。");
@@ -3757,7 +4217,8 @@ async function uploadKnowledge() {
     closeModal();
     await viewKnowledge(id);
   } catch (err) {
-    alert(formatError("knowledge", err));
+    const failureReason = await errorWithExtractionDiagnostics(runtime, err, { dataset: { step: "extract" } });
+    alert(`[knowledge] error: ${failureReason}`);
   } finally {
     updateActionState();
   }
@@ -4348,7 +4809,9 @@ function guessMime(name) {
   if (archiveKind(name) === "tar.gz") return "application/gzip";
   if (ext === "pdf") return "application/pdf";
   if (ext === "docx") return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  if (ext === "pptx") return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
   if (ext === "xlsx") return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  if (ext === "xls") return "application/vnd.ms-excel";
   if (ext === "csv") return "text/csv; charset=utf-8";
   if (ext === "md" || ext === "markdown") return "text/markdown; charset=utf-8";
   if (ext === "txt") return TEXT_UPLOAD_TYPE;
