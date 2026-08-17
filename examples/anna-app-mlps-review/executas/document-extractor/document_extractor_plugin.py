@@ -51,7 +51,7 @@ ARCHIVE_CACHE_DIR = DOWNLOAD_CACHE_DIR / "archives"
 MANIFEST: dict[str, Any] = {
     "name": "tool-intern2-document-extractor-u2n2j8x5",
     "display_name": "Document Extractor",
-    "version": "0.1.9",
+    "version": "0.1.10",
     "description": "Extract plain text from PDF, DOCX, XLSX, CSV, TXT, Markdown, and archive files for MLPS review.",
     "author": "Anna Developer",
     "license": "MIT",

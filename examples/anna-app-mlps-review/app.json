@@ -1,7 +1,7 @@
 {
   "slug": "mlps-review",
   "name": "MLPS Review",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "tagline": "Manage MLPS projects, knowledge bases, and document review records.",
   "description": "MLPS Review helps teams manage companies, MLPS projects, company knowledge bases, and document review records. The app reads ordinary PDF, DOCX, PPTX, XLSX, and XLS files with Anna native doc_read/sheet_read when available, keeps the bundled Executa for archives and OCR fallback, retrieves relevant company knowledge, and asks the host LLM for compliance gaps, evidence, and remediation suggestions.",
   "category": "developer-tools",
