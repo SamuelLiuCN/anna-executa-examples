@@ -14,6 +14,7 @@ import gc
 import hashlib
 import io
 import json
+import os
 import platform
 import re
 import shutil
@@ -47,11 +48,23 @@ OCR_PAGE_TIMEOUT_SECONDS = 20
 OCR_TOTAL_BUDGET_SECONDS = 120
 DOWNLOAD_CACHE_DIR = Path(tempfile.gettempdir()) / "anna-mlps-review-cache"
 ARCHIVE_CACHE_DIR = DOWNLOAD_CACHE_DIR / "archives"
+TESSERACT_CANDIDATE_PATHS = [
+    "/opt/homebrew/bin/tesseract",
+    "/usr/local/bin/tesseract",
+    "/usr/bin/tesseract",
+]
+TESSDATA_CANDIDATE_DIRS = [
+    "/opt/homebrew/share/tessdata",
+    "/usr/local/share/tessdata",
+    "/usr/share/tessdata",
+    "/usr/share/tesseract-ocr/4.00/tessdata",
+    "/usr/share/tesseract-ocr/5/tessdata",
+]
 
 MANIFEST: dict[str, Any] = {
     "name": "tool-intern2-document-extractor-u2n2j8x5",
     "display_name": "Document Extractor",
-    "version": "0.1.10",
+    "version": "0.1.11",
     "description": "Extract plain text from PDF, DOCX, XLSX, CSV, TXT, Markdown, and archive files for MLPS review.",
     "author": "Anna Developer",
     "license": "MIT",
@@ -457,7 +470,73 @@ def _open_pdf(source: bytes | str | Path) -> fitz.Document:
     return fitz.open(stream=source, filetype="pdf")
 
 
+def _is_executable_file(path: str) -> bool:
+    return bool(path) and Path(path).is_file() and os.access(path, os.X_OK)
+
+
+def _resolve_tesseract() -> dict[str, Any]:
+    candidates: list[tuple[str, str]] = []
+    env_cmd = os.environ.get("TESSERACT_CMD", "").strip()
+    if env_cmd:
+        candidates.append(("TESSERACT_CMD", env_cmd))
+
+    path_cmd = shutil.which("tesseract")
+    if path_cmd:
+        candidates.append(("PATH", path_cmd))
+
+    for candidate_path in TESSERACT_CANDIDATE_PATHS:
+        candidates.append(("known_path", candidate_path))
+
+    attempted: list[str] = []
+    seen: set[str] = set()
+    resolved_path = ""
+    resolution_source = ""
+    for source, candidate_path in candidates:
+        candidate_path = str(Path(candidate_path).expanduser())
+        if candidate_path in seen:
+            continue
+        seen.add(candidate_path)
+        attempted.append(candidate_path)
+        if _is_executable_file(candidate_path):
+            resolved_path = candidate_path
+            resolution_source = source
+            break
+
+    tessdata_prefix = os.environ.get("TESSDATA_PREFIX", "").strip()
+    tessdata_source = "TESSDATA_PREFIX" if tessdata_prefix else ""
+    if tessdata_prefix and not Path(tessdata_prefix).is_dir():
+        tessdata_prefix = ""
+        tessdata_source = ""
+    if not tessdata_prefix:
+        for candidate_dir in TESSDATA_CANDIDATE_DIRS:
+            if Path(candidate_dir).is_dir():
+                tessdata_prefix = candidate_dir
+                tessdata_source = "known_path"
+                break
+
+    if resolved_path:
+        pytesseract.pytesseract.tesseract_cmd = resolved_path
+    if tessdata_prefix:
+        os.environ["TESSDATA_PREFIX"] = tessdata_prefix
+
+    return {
+        "available": bool(resolved_path),
+        "path": resolved_path,
+        "resolution_source": resolution_source,
+        "attempted_paths": attempted,
+        "tessdata_prefix": tessdata_prefix,
+        "tessdata_source": tessdata_source,
+    }
+
+
 def _tesseract_lang(warnings: list[str]) -> str:
+    resolved = _resolve_tesseract()
+    if not resolved["available"]:
+        warnings.append(
+            "Tesseract 未找到，已尝试："
+            + "、".join(resolved["attempted_paths"])
+        )
+        return "eng"
     try:
         langs = set(pytesseract.get_languages(config=""))
     except Exception as exc:  # noqa: BLE001
@@ -1320,7 +1399,8 @@ def tool_extract_archive_entry(
 
 
 def tool_diagnose_environment() -> dict[str, Any]:
-    tesseract_path = shutil.which("tesseract")
+    tesseract = _resolve_tesseract()
+    tesseract_path = tesseract["path"]
     tesseract_version = ""
     tesseract_languages: list[str] = []
     tesseract_error = ""
@@ -1351,7 +1431,8 @@ def tool_diagnose_environment() -> dict[str, Any]:
         except Exception as exc:  # noqa: BLE001
             tesseract_error = f"{tesseract_error}; tesseract --list-langs failed: {exc}".strip("; ")
     else:
-        tesseract_error = "tesseract executable not found in PATH"
+        attempted = "、".join(tesseract["attempted_paths"])
+        tesseract_error = f"tesseract executable not found; attempted: {attempted}"
 
     return {
         "plugin_version": MANIFEST["version"],
@@ -1366,6 +1447,10 @@ def tool_diagnose_environment() -> dict[str, Any]:
         "tesseract": {
             "available": bool(tesseract_path),
             "path": tesseract_path or "",
+            "resolution_source": tesseract["resolution_source"],
+            "attempted_paths": tesseract["attempted_paths"],
+            "tessdata_prefix": tesseract["tessdata_prefix"],
+            "tessdata_source": tesseract["tessdata_source"],
             "version": tesseract_version,
             "languages": tesseract_languages[:40],
             "has_chi_sim": "chi_sim" in tesseract_languages,

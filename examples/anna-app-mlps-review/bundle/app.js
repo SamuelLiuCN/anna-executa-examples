@@ -1915,7 +1915,9 @@ function formatExtractorDiagnostic(diag) {
     `PyMuPDF: ${diag.dependencies?.fitz || "-"}`,
     `pytesseract: ${diag.dependencies?.pytesseract || "-"}`,
     `Tesseract: ${tesseract.available ? "available" : "missing"}${tesseract.path ? ` (${tesseract.path})` : ""}`,
+    tesseract.resolution_source ? `Tesseract source: ${tesseract.resolution_source}` : "",
     tesseract.version ? `Tesseract version: ${tesseract.version}` : "",
+    tesseract.tessdata_prefix ? `Tessdata: ${tesseract.tessdata_prefix}` : "",
     `chi_sim: ${tesseract.has_chi_sim ? "installed" : "missing"}`,
     tesseract.error ? `Tesseract error: ${tesseract.error}` : "",
   ].filter(Boolean);
