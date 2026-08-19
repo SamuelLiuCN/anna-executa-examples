@@ -42,6 +42,11 @@ const REVIEW_REPORT_END_MARKER = "<!-- MLPS_REVIEW_REPORT_END -->";
 const REVIEW_MAX_RETRIES = 3;
 const REVIEW_FINAL_CONTEXT_CHARS = 70000;
 const REVIEW_FINDINGS_CONTEXT_CHARS = 52000;
+const INTERPRET_REPORT_END_MARKER = "<!-- MLPS_INTERPRET_REPORT_END -->";
+const INTERPRET_MAX_RETRIES = 3;
+const INTERPRET_SEGMENT_CHARS = 70000;
+const INTERPRET_FINDINGS_CONTEXT_CHARS = 52000;
+const INTERPRET_FINAL_CONTEXT_CHARS = 70000;
 const MAX_KNOWLEDGE_ITEMS = 8;
 const MAX_KNOWLEDGE_CHARS = 40000;
 const MAX_INTERPRET_SYSTEM_PROMPT_CHARS = 3000;
@@ -535,10 +540,10 @@ function setBusy(isBusy) {
   els.interpretAnalyze.disabled = isBusy || !selectedInterpretFile || !currentProject();
   els.interpretAnalyze.classList.toggle("busy", isBusy);
   els.interpretAnalyze.textContent = isBusy ? "解读中" : "开始解读";
-  els.interpretChatSend.disabled = isBusy || isSendingInterpretMessage || !currentInterpret() || !currentProject();
+  els.interpretChatSend.disabled = isBusy || isSendingInterpretMessage || !currentInterpret() || currentInterpret()?.reportComplete === false || !currentProject();
   els.interpretChatSend.classList.toggle("busy", isSendingInterpretMessage);
   els.interpretChatSend.textContent = isSendingInterpretMessage ? "发送中" : "发送";
-  els.interpretChatInput.disabled = isBusy || isSendingInterpretMessage || !currentInterpret() || !currentProject();
+  els.interpretChatInput.disabled = isBusy || isSendingInterpretMessage || !currentInterpret() || currentInterpret()?.reportComplete === false || !currentProject();
   const uploadBtn = $("knowledge-upload-btn");
   if (uploadBtn) uploadBtn.disabled = isBusy || !selectedKnowledgeFile || !currentCompany();
 }
@@ -628,6 +633,7 @@ function slimInterpretRecordForStorage(record) {
   const { analysis, evidenceIndexCache, ...rest } = record;
   return {
     ...rest,
+    failureReason: compactStringForStorage(rest.failureReason, 4000),
     sourceArchive: slimArchiveForStorage(rest.sourceArchive),
     messages: (rest.messages || []).slice(-MAX_INTERPRET_RECENT_MESSAGES).map((message) => ({
       ...message,
@@ -938,7 +944,7 @@ function renderInterpretList() {
       .map((record) => `
         <tr class="${record.id === selectedInterpretId ? "selected-row" : ""}">
           <td class="cell-strong">${escapeHtml(record.title)}</td>
-          <td><span class="status-chip">${escapeHtml(record.status || "-")}</span></td>
+          <td><span class="${interpretStatusClass(record)}">${escapeHtml(interpretStatusLabel(record))}</span></td>
           <td>${record.processedPages || 0}/${record.pageCount || "-"}</td>
           <td>${(record.knowledgeRefs || []).length} 条</td>
           <td>${Math.floor((record.messages || []).length / 2)} 轮</td>
@@ -946,7 +952,7 @@ function renderInterpretList() {
           <td>${rowActions([
             ["open-interpret", record.id, "打开", "ghost"],
             ["download-interpret-source", record.id, "下载源文件", "ghost"],
-            ["download-interpret-report", record.id, "下载报告", "ghost"],
+            ["download-interpret-report", record.id, "下载报告", "ghost", !interpretReportPath(record)],
             ["delete-interpret", record.id, "删除", "danger"],
           ])}</td>
         </tr>
@@ -955,15 +961,36 @@ function renderInterpretList() {
   );
 }
 
+function interpretStatusLabel(record) {
+  if (!record) return "-";
+  if (record.status) return record.status;
+  if (record.reportComplete === false || record.completionState === "failed") return "失败";
+  return "已完成";
+}
+
+function interpretStatusClass(record) {
+  const label = interpretStatusLabel(record);
+  if (label === "失败") return "status-chip danger";
+  if (label === "重试中") return "status-chip warning";
+  if (label === "运行中") return "status-chip info";
+  return "status-chip";
+}
+
+function interpretReportPath(record) {
+  if (!record) return "";
+  if (record.reportComplete === false) return "";
+  return record.analysisPath || "";
+}
+
 function renderInterpretWorkspace() {
   const record = currentInterpret();
   els.interpretDownloadSource.disabled = !record?.sourceFilePath;
-  els.interpretDownloadReport.disabled = !record?.analysisPath;
+  els.interpretDownloadReport.disabled = !interpretReportPath(record);
   els.interpretClearChat.disabled = !record || !(record.messages || []).length;
-  els.interpretChatSend.disabled = isSendingInterpretMessage || !record || !currentProject();
+  els.interpretChatSend.disabled = isSendingInterpretMessage || !record || record.reportComplete === false || !currentProject();
   els.interpretChatSend.classList.toggle("busy", isSendingInterpretMessage);
   els.interpretChatSend.textContent = isSendingInterpretMessage ? "发送中" : "发送";
-  els.interpretChatInput.disabled = isSendingInterpretMessage || !record || !currentProject();
+  els.interpretChatInput.disabled = isSendingInterpretMessage || !record || record.reportComplete === false || !currentProject();
   if (!record) {
     if (!selectedInterpretFile) {
       els.interpretReport.textContent = currentProject()
@@ -974,7 +1001,10 @@ function renderInterpretWorkspace() {
     return;
   }
   if (record.analysis) {
-    els.interpretReport.innerHTML = renderMarkdown(record.analysis);
+    const notice = record.reportComplete === false
+      ? `> 当前解读报告未完整生成。阶段：${record.failureStage || "-"}；原因：${record.failureReason || "-"}\n\n`
+      : "";
+    els.interpretReport.innerHTML = renderMarkdown(`${notice}${record.analysis}`);
   }
   renderInterpretMessages(record.messages || []);
   els.interpretStatName.textContent = record.sourceFilename || basename(record.sourceFilePath) || "-";
@@ -1014,10 +1044,10 @@ function updateActionState() {
   els.interpretAnalyze.disabled = !selectedInterpretFile || !currentCompany() || !currentProject();
   els.knowledgeOpenUpload.disabled = !currentCompany();
   els.projectCreate.disabled = !currentCompany();
-  els.interpretChatSend.disabled = isSendingInterpretMessage || !currentInterpret() || !currentProject();
+  els.interpretChatSend.disabled = isSendingInterpretMessage || !currentInterpret() || currentInterpret()?.reportComplete === false || !currentProject();
   els.interpretChatSend.classList.toggle("busy", isSendingInterpretMessage);
   els.interpretChatSend.textContent = isSendingInterpretMessage ? "发送中" : "发送";
-  els.interpretChatInput.disabled = isSendingInterpretMessage || !currentInterpret() || !currentProject();
+  els.interpretChatInput.disabled = isSendingInterpretMessage || !currentInterpret() || currentInterpret()?.reportComplete === false || !currentProject();
   const uploadBtn = $("knowledge-upload-btn");
   if (uploadBtn) {
     uploadBtn.disabled = !selectedKnowledgeFile || !currentCompany();
@@ -3137,6 +3167,371 @@ async function analyzeDocumentWithLlm(extraction, knowledgeRefs, record = null) 
   return completeReviewReportWithValidation(extraction, knowledgeRefs, partialReports, findingsDigest, chunkMap, record);
 }
 
+function stripInterpretEndMarker(text) {
+  return String(text || "").replace(INTERPRET_REPORT_END_MARKER, "").trim();
+}
+
+function isMostlyEnglishText(text) {
+  const sample = String(text || "").replace(/```[\s\S]*?```/g, "").slice(0, 1200);
+  const chinese = (sample.match(/[\u4e00-\u9fa5]/g) || []).length;
+  const latin = (sample.match(/[A-Za-z]/g) || []).length;
+  return latin > 180 && chinese < 40;
+}
+
+function isInterpretReportComplete(report, reply = null) {
+  const value = String(report || "").trim();
+  const finishReason = llmFinishReason(reply);
+  if (!value) {
+    return { ok: false, reason: "解读报告为空", finishReason };
+  }
+  if (isLengthFinishReason(finishReason)) {
+    return { ok: false, reason: `LLM 因长度限制停止：${finishReason}`, finishReason };
+  }
+  if (!value.includes(INTERPRET_REPORT_END_MARKER)) {
+    return { ok: false, reason: "缺少解读报告结束标记", finishReason };
+  }
+  const markerIndex = value.lastIndexOf(INTERPRET_REPORT_END_MARKER);
+  if (value.slice(markerIndex + INTERPRET_REPORT_END_MARKER.length).trim()) {
+    return { ok: false, reason: "结束标记后仍有额外内容", finishReason };
+  }
+  const visible = stripInterpretEndMarker(value);
+  const codeFenceCount = (visible.match(/```/g) || []).length;
+  if (codeFenceCount % 2 === 1) {
+    return { ok: false, reason: "Markdown 代码块未闭合", finishReason };
+  }
+  const tail = visible.slice(-180).trim();
+  if (/[`、，,：:（(【[]$/.test(tail) || /[A-Za-z*_\-—]$/.test(tail) && !/[。！？.!?）)]$/.test(tail)) {
+    return { ok: false, reason: "报告末尾疑似断在半截句子中", finishReason };
+  }
+  if (isMostlyEnglishText(visible)) {
+    return { ok: false, reason: "报告主体疑似未按要求输出中文", finishReason };
+  }
+  if (/\bhalf-baked\b/i.test(visible)) {
+    return { ok: false, reason: "报告包含不专业英文措辞", finishReason };
+  }
+  return { ok: true, reason: "", finishReason };
+}
+
+function makeIncompleteInterpretError(validation, report, reply) {
+  const err = new Error(`LLM 解读报告未完整生成：${validation.reason || "未知原因"}`);
+  err.partialReport = stripInterpretEndMarker(report);
+  err.llmFinishReason = validation.finishReason || llmFinishReason(reply);
+  err.failureStage = "finalize";
+  return err;
+}
+
+function extractInterpretOutput(report) {
+  return stripInterpretEndMarker(report);
+}
+
+function interpretCoverageSummary(extraction) {
+  const lines = [];
+  if (extraction?.kind === "archive") {
+    lines.push(`参与文件：${extraction.processed_file_count || 0}/${extraction.file_count || 0}`);
+  } else if (extraction?.page_count || extraction?.processed_page_count) {
+    lines.push(`处理页数：${extraction.processed_page_count || extraction.page_count || "-"} / ${extraction.page_count || "-"}`);
+  }
+  if (extraction?.truncated) lines.push("抽取文本已达到字符上限，解读仅覆盖已抽取内容");
+  if (extraction?.ocr_used) lines.push(`OCR：识别 ${extraction.ocr_page_count || 0} 页，语言 ${extraction.ocr_lang || "-"}`);
+  const warnings = Array.isArray(extraction?.warnings) ? extraction.warnings.slice(0, 8) : [];
+  if (warnings.length) lines.push(`抽取提示：${warnings.join("；")}`);
+  return lines.length ? lines.join("\n") : "无覆盖范围限制。";
+}
+
+function splitInterpretTextIntoStructuredBlocks(extraction) {
+  const text = String(extraction?.text || "").replace(/\r\n?/g, "\n").trim();
+  if (!text) return [];
+  const fallbackLabel = normalizeSourceLabel(extraction?.filename || selectedInterpretFile?.name || "第三方测试结果");
+  const lines = text.split("\n");
+  const fileSections = [];
+  let currentLabel = fallbackLabel;
+  let currentLines = [];
+  let sawFileMarker = false;
+  const flush = () => {
+    const body = currentLines.join("\n").trim();
+    if (!body) return;
+    fileSections.push({ label: currentLabel, text: body });
+    currentLines = [];
+  };
+  for (const line of lines) {
+    const match = line.match(/^### 文件：\s*(.+)$/);
+    if (match) {
+      sawFileMarker = true;
+      flush();
+      currentLabel = normalizeSourceLabel(match[1]) || fallbackLabel;
+      continue;
+    }
+    currentLines.push(line);
+  }
+  flush();
+  const sections = sawFileMarker ? fileSections : [{ label: fallbackLabel, text }];
+  return sections.flatMap((section) => splitInterpretSectionByPageMarkers(section.text, section.label));
+}
+
+function splitInterpretSectionByPageMarkers(sectionText, fileLabel) {
+  const lines = String(sectionText || "").replace(/\r\n?/g, "\n").split("\n");
+  const pageBlocks = [];
+  let currentPage = null;
+  let currentLines = [];
+  let sawPageMarker = false;
+  const flush = () => {
+    const text = currentLines.join("\n").trim();
+    if (!text) return;
+    pageBlocks.push({
+      text,
+      sourceRefs: [
+        {
+          file: fileLabel,
+          pageStart: currentPage,
+          pageEnd: currentPage,
+          kind: currentPage != null ? "page" : "file",
+        },
+      ],
+    });
+    currentLines = [];
+  };
+  for (const line of lines) {
+    const match = line.match(/^--- 第\s*(\d+)\s*页(?:（OCR）|\(OCR\))?---$/);
+    if (match) {
+      sawPageMarker = true;
+      if (currentLines.length && currentPage == null) currentPage = Number(match[1]);
+      flush();
+      currentPage = Number(match[1]);
+      continue;
+    }
+    currentLines.push(line);
+  }
+  flush();
+  if (!sawPageMarker) {
+    const text = String(sectionText || "").trim();
+    return text ? [{ text, sourceRefs: [{ file: fileLabel, pageStart: null, pageEnd: null, kind: "file" }] }] : [];
+  }
+  return pageBlocks;
+}
+
+function packStructuredInterpretChunks(blocks, maxChars = INTERPRET_SEGMENT_CHARS) {
+  const chunks = [];
+  let currentText = "";
+  let currentSourceRefs = [];
+  const flush = () => {
+    const text = currentText.trim();
+    if (!text) return;
+    chunks.push({
+      text,
+      sourceRefs: mergeSourceRefs(currentSourceRefs),
+    });
+    currentText = "";
+    currentSourceRefs = [];
+  };
+  for (const block of blocks) {
+    const pieces = splitText(block.text, maxChars);
+    const blockRefs = Array.isArray(block.sourceRefs) ? block.sourceRefs : [];
+    for (const [index, piece] of pieces.entries()) {
+      const partIndex = pieces.length > 1 ? index + 1 : 1;
+      const partCount = pieces.length || 1;
+      const pieceRefs = blockRefs.map((ref) => ({
+        ...ref,
+        partIndex,
+        partCount,
+      }));
+      const candidate = currentText ? `${currentText}\n\n${piece}` : piece;
+      if (currentText && candidate.length > maxChars) {
+        flush();
+      }
+      currentText = currentText ? `${currentText}\n\n${piece}` : piece;
+      currentSourceRefs.push(...pieceRefs);
+      if (currentText.length >= maxChars) flush();
+    }
+  }
+  flush();
+  return chunks;
+}
+
+function splitInterpretTextIntoStructuredChunks(extraction) {
+  const blocks = splitInterpretTextIntoStructuredBlocks(extraction);
+  if (!blocks.length) return [];
+  return packStructuredInterpretChunks(blocks, INTERPRET_SEGMENT_CHARS);
+}
+
+function interpretSystemPrompt() {
+  return "你是网络安全等级保护测评结果解读与整改顾问。你必须使用中文 Markdown 输出，直接给出报告正文，不要自我介绍。你必须区分第三方测试结果文件依据、公司知识库补充材料、模型推断/需核对事项；不得声称这是正式认证或最终测评结论。措辞保持专业，不使用口语化或英文俚语。";
+}
+
+function buildInterpretSegmentPrompt(extraction, knowledgeRefs, chunk, scope) {
+  const project = currentProject();
+  return `请从以下第三方网络安全等级保护测评/测试结果片段中提取可用于最终解读报告的问题清单。不要生成最终报告，不要输出结束标记。
+
+公司：${currentCompany()?.name || "-"}
+项目：${project?.name || "-"}
+系统名称：${project?.systemName || "-"}
+页面选择保护等级：${project?.level || els.level.value}
+文件名：${selectedInterpretFile?.name || extraction.filename || "-"}
+本段范围：${scope}
+
+要求：
+1. 只输出中文 Markdown。
+2. 保留不符合项、部分符合项、风险等级、涉及控制域、证据来源、页码/文件名。
+3. 如果报告原文等级与页面选择等级不一致，标记为“等级信息不一致”，不要混为同一事实。
+4. 对疑似 OCR 错误或数学不一致单列“数据质量/需核对”，例如 641% 可结合上下文推断为 6.41%，但必须标注“推断/需核对”。
+5. 不使用英文主体回答，不使用 half-baked 等口语化措辞。
+
+公司知识库补充材料：
+${buildKnowledgeContext(knowledgeRefs)}
+
+测试结果片段：
+${chunk.text}`;
+}
+
+async function summarizeInterpretSegment(extraction, knowledgeRefs, chunk, scope, record) {
+  const runtime = await annaReady;
+  const reply = await completeInterpretLlmWithRetry(
+    () => runtime.llm.complete({
+      systemPrompt: interpretSystemPrompt(),
+      messages: [
+        {
+          role: "user",
+          content: { type: "text", text: buildInterpretSegmentPrompt(extraction, knowledgeRefs, chunk, scope) },
+        },
+      ],
+      maxTokens: 1400,
+      temperature: 0.1,
+    }),
+    "分段解读摘要",
+    record,
+    "analyze",
+  );
+  return extractContent(reply);
+}
+
+function buildFinalInterpretPrompt(extraction, knowledgeRefs, segmentSummaries, chunkMap) {
+  const project = currentProject();
+  return `请把以下第三方等保测评/测试结果问题摘要汇总为一份完整解读报告。
+
+必须满足：
+1. 直接输出中文 Markdown 报告正文，不要写“作为资深顾问”等自我介绍。
+2. 结构必须包含：覆盖范围说明、等级信息核对、测评结果概览、不符合项/部分符合项清单、风险排序、整改建议、证据与疑点、后续追问建议。
+3. 明确区分“第三方测试结果文件依据”“公司知识库补充依据”“推断/需核对”。
+4. 对 OCR 疑似错误、比例计算异常、等级不一致单独标注为“数据质量/需核对”，不得当作确定事实。
+5. 不要声称这是正式认证或最终测评结论。
+6. 不输出英文主体内容，不使用口语化或不专业措辞。
+7. 最后一行必须原样输出结束标记：${INTERPRET_REPORT_END_MARKER}
+
+公司：${currentCompany()?.name || "-"}
+项目：${project?.name || "-"}
+系统名称：${project?.systemName || "-"}
+页面选择保护等级：${project?.level || els.level.value}
+文件名：${selectedInterpretFile?.name || extraction.filename || "-"}
+
+覆盖范围说明：
+${interpretCoverageSummary(extraction)}
+
+使用知识库：${knowledgeRefs.map((k) => k.title).join("；") || "未使用公司知识库"}
+
+分段来源映射：
+${compactText(chunkMap, 12000, "分段来源映射已截断")}
+
+分段问题摘要：
+${compactText(segmentSummaries.join("\n\n"), INTERPRET_FINDINGS_CONTEXT_CHARS, "分段问题摘要已截断")}
+
+必要时参考的原文节选：
+${compactText(extraction.text || "", INTERPRET_FINAL_CONTEXT_CHARS - INTERPRET_FINDINGS_CONTEXT_CHARS, "原文节选已截断")}`;
+}
+
+async function completeInterpretReportWithValidation(extraction, knowledgeRefs, segmentSummaries, chunkMap, record) {
+  const runtime = await annaReady;
+  let reply = await completeInterpretLlmWithRetry(
+    () => runtime.llm.complete({
+      systemPrompt: interpretSystemPrompt(),
+      messages: [
+        {
+          role: "user",
+          content: { type: "text", text: buildFinalInterpretPrompt(extraction, knowledgeRefs, segmentSummaries, chunkMap) },
+        },
+      ],
+      maxTokens: 5200,
+      temperature: 0.2,
+    }),
+    "最终解读报告汇总",
+    record,
+    "finalize",
+  );
+  let report = extractContent(reply);
+  let validation = isInterpretReportComplete(report, reply);
+
+  for (let attempt = 1; !validation.ok && attempt <= INTERPRET_MAX_RETRIES; attempt += 1) {
+    await updateInterpretRecord(record, {
+      status: "重试中",
+      completionState: "retrying",
+      retryCount: attempt,
+      maxRetries: INTERPRET_MAX_RETRIES,
+      failureStage: "finalize",
+      failureReason: validation.reason,
+      llmFinishReason: validation.finishReason,
+    });
+    setProgress(`解读报告可能不完整，正在自动续写 ${attempt}/${INTERPRET_MAX_RETRIES}：${validation.reason}`, null);
+    const continuation = await completeInterpretLlmWithRetry(
+      () => runtime.llm.complete({
+        systemPrompt: interpretSystemPrompt(),
+        messages: [
+          {
+            role: "user",
+            content: {
+              type: "text",
+              text: `上一轮解读报告没有完整结束。请从断点继续补全，不要重写已完成内容；如果已经完整，请只输出缺失的结尾部分。最后一行必须原样输出：${INTERPRET_REPORT_END_MARKER}
+
+当前报告末尾：
+${report.slice(-8000)}`,
+            },
+          },
+        ],
+        maxTokens: 2600,
+        temperature: 0.1,
+      }),
+      "最终解读报告续写",
+      record,
+      "finalize",
+    );
+    reply = continuation;
+    report = `${stripInterpretEndMarker(report)}\n\n${extractContent(continuation)}`.trim();
+    validation = isInterpretReportComplete(report, continuation);
+  }
+
+  if (!validation.ok) {
+    throw makeIncompleteInterpretError(validation, report, reply);
+  }
+
+  return {
+    content: extractInterpretOutput(report),
+    model: reply?.model,
+    finishReason: validation.finishReason,
+    interpretMeta: {
+      reportComplete: true,
+      llmFinishReason: validation.finishReason,
+      retryCount: record?.retryCount || 0,
+    },
+  };
+}
+
+async function analyzeInterpretationWithLlm(extraction, knowledgeRefs, record = null) {
+  const chunks = splitInterpretTextIntoStructuredChunks(extraction);
+  if (!chunks.length) throw new Error("没有可分析的解读文本分段。");
+  const chunkMap = chunks
+    .map((chunk, index) => `- 第 ${index + 1} / ${chunks.length} 段；来源：${summarizeSourceRefs(chunk.sourceRefs)}`)
+    .join("\n");
+  const segmentSummaries = [];
+  for (let index = 0; index < chunks.length; index += 1) {
+    const chunk = chunks[index];
+    const scope = chunks.length <= 1
+      ? `全文；来源：${summarizeSourceRefs(chunk.sourceRefs)}`
+      : `第 ${index + 1} / ${chunks.length} 段；来源：${summarizeSourceRefs(chunk.sourceRefs)}`;
+    setProgress(`LLM 分段解读 ${index + 1} / ${chunks.length}；${summarizeSourceRefs(chunk.sourceRefs)}`, null);
+    els.interpretReport.textContent = `正在提取分段问题摘要：${scope}`;
+    segmentSummaries.push(await summarizeInterpretSegment(extraction, knowledgeRefs, chunk, scope, record));
+  }
+  setProgress("LLM 正在汇总解读报告", null);
+  return completeInterpretReportWithValidation(extraction, knowledgeRefs, segmentSummaries, chunkMap, record);
+}
+
 function tokenize(text) {
   const tokens = new Set();
   for (const term of CONTROL_TERMS) {
@@ -3542,37 +3937,6 @@ ${compactText(transcript, 18000, "历史对话已截断")}`,
   }
 }
 
-function buildInterpretPrompt(extraction, knowledgeRefs) {
-  const text = extraction.text || "";
-  const project = currentProject();
-  const truncated =
-    text.length > MAX_LLM_CHARS
-      ? `${text.slice(0, MAX_LLM_CHARS)}\n\n[文本已截断：原始 ${text.length} 字符，仅分析前 ${MAX_LLM_CHARS} 字符]`
-      : text;
-  return `请解读以下第三方网络安全等级保护测评/测试结果文件。
-
-公司：${currentCompany()?.name || "-"}
-项目：${project?.name || "-"}
-系统名称：${project?.systemName || "-"}
-保护等级：${project?.level || els.level.value}
-文件名：${selectedInterpretFile?.name || extraction.filename || "-"}
-
-请使用中文输出 Markdown，结构必须包含：
-1. 测评结果概览：说明整体状态、主要结论和需要管理层关注的事项。
-2. 不符合项清单：按风险高/中/低归类，列出问题、影响、涉及控制域、证据来源。
-3. 整改建议：每个不符合项给出可执行整改动作、责任方向、优先级和建议佐证材料。
-4. 证据与疑点：明确哪些来自第三方测试结果文件，哪些来自公司知识库补充材料，哪些是基于专业经验的推断。
-5. 后续追问建议：列出 3-5 个值得继续追问的问题。
-
-限制：不要声称这是正式认证或最终测评结论；若文件中证据不足，必须标注“证据不足”。
-
-公司知识库补充材料：
-${buildKnowledgeContext(knowledgeRefs)}
-
-第三方测试结果文件正文：
-${truncated}`;
-}
-
 function buildCompactInterpretSystemPrompt(record = null) {
   const project = currentProject();
   const knowledgeTitles = (record?.knowledgeRefs || []).map((k) => k.title).join("；") || "未使用公司知识库";
@@ -3592,18 +3956,6 @@ function buildCompactInterpretSystemPrompt(record = null) {
 - 对证据不足的地方直接说明证据不足，并给出需要补充的材料。
 - 不要声称这是正式认证或最终测评结论。
 - 输出中文 Markdown，尽量给出可落地整改建议。`, MAX_INTERPRET_SYSTEM_PROMPT_CHARS, "系统提示已压缩");
-}
-
-async function analyzeInterpretationWithLlm(extraction, knowledgeRefs) {
-  const runtime = await annaReady;
-  return runtime.llm.complete({
-    systemPrompt: "你是资深网络安全等级保护（等保 2.0）测评结果解读顾问。你擅长从第三方测评报告、测试结果和整改清单中识别不符合项、风险等级、整改路径和证据缺口。你必须区分文件依据、公司知识库补充材料和推断建议。",
-    messages: [
-      { role: "user", content: { type: "text", text: buildInterpretPrompt(extraction, knowledgeRefs) } },
-    ],
-    maxTokens: 3200,
-    temperature: 0.2,
-  });
 }
 
 function extractAgentFrameText(frame) {
@@ -3752,6 +4104,45 @@ async function updateReviewRecord(record, patch) {
     renderModal();
   }
   return record;
+}
+
+async function updateInterpretRecord(record, patch) {
+  if (!record) return null;
+  Object.assign(record, patch, { updatedAt: nowIso() });
+  await saveStateSlice("interprets");
+  renderInterpretList();
+  if (currentInterpret()?.id === record.id) {
+    renderInterpretWorkspace();
+  }
+  return record;
+}
+
+async function completeInterpretLlmWithRetry(requestFactory, stageLabel, record = null, failureStage = "analyze") {
+  let lastErr = null;
+  for (let attempt = 0; attempt <= INTERPRET_MAX_RETRIES; attempt += 1) {
+    try {
+      if (attempt > 0) {
+        setProgress(`${stageLabel}失败，正在自动重试 ${attempt}/${INTERPRET_MAX_RETRIES}`, null);
+      }
+      return await requestFactory(attempt);
+    } catch (err) {
+      lastErr = err;
+      if (attempt >= INTERPRET_MAX_RETRIES) break;
+      if (record) {
+        await updateInterpretRecord(record, {
+          status: "重试中",
+          completionState: "retrying",
+          retryCount: attempt + 1,
+          maxRetries: INTERPRET_MAX_RETRIES,
+          failureStage,
+          failureReason: errorMessage(err),
+        });
+      }
+      setProgress(`${stageLabel}失败，正在自动重试 ${attempt + 1}/${INTERPRET_MAX_RETRIES}：${errorMessage(err)}`, null);
+      await wait(1000);
+    }
+  }
+  throw lastErr || new Error(`${stageLabel}失败`);
 }
 
 function makeReviewRecord({ id, company, project, filename, contentType, size, sourceFilePath, basePath, params, status = "运行中" }) {
@@ -4035,15 +4426,69 @@ async function runInterpretation() {
   const safeName = sanitizeFilename(file.name);
   const basePath = `mlps-review/companies/${company.id}/projects/${project.id}/interprets/${recordId}`;
   const contentType = file.type || guessMime(file.name);
+  const sourceFilePath = `${basePath}/source/${safeName}`;
+  const extractedTextPath = `${basePath}/extracted.txt`;
+  const analysisPath = `${basePath}/analysis.md`;
+  const analysisDraftPath = `${basePath}/analysis-draft.md`;
+  const evidenceIndexPath = `${basePath}/evidence-index.json`;
+  const now = nowIso();
+  const record = {
+    id: recordId,
+    companyId: company.id,
+    projectId: project.id,
+    title: `${file.name} · ${formatDate(now)}`,
+    sourceFilePath,
+    sourceFilename: file.name,
+    sourceMimeType: contentType,
+    sourceSizeBytes: file.size,
+    extractedTextPath,
+    analysisPath,
+    analysisDraftPath,
+    analysis: "",
+    analysisDigest: "",
+    extractionDigest: "",
+    conversationDigest: "",
+    evidenceIndexPath,
+    evidenceIndex: null,
+    status: "运行中",
+    completionState: "running",
+    reportComplete: false,
+    failureStage: "",
+    failureReason: "",
+    llmFinishReason: "",
+    retryCount: 0,
+    maxRetries: INTERPRET_MAX_RETRIES,
+    analysisDraftAvailable: false,
+    processedPages: null,
+    pageCount: null,
+    sourceArchive: null,
+    charCount: 0,
+    knowledgeRefs: [],
+    appSessionUuid: "",
+    messages: [],
+    summary: "",
+    params: {
+      maxPages: selectedInterpretPages(),
+      ocrDpi: OCR_DPI,
+      useKnowledge: els.interpretUseKnowledge.checked,
+    },
+    createdAt: now,
+    updatedAt: now,
+  };
+  appState.interprets.unshift(record);
+  selectedInterpretId = recordId;
+  await saveStateSlice("interprets");
+  renderInterpretList();
 
   try {
     markStep("extract", "active", "interpret");
     setProgress("正在上传第三方测试结果源文件", null);
-    const sourceFilePath = await uploadFileToPath(runtime, file, `${basePath}/source/${safeName}`, contentType);
+    await uploadFileToPath(runtime, file, sourceFilePath, contentType);
     const source =
       file.size <= INLINE_CAP_BYTES
         ? await inlineSource(file, contentType)
         : storedSource(contentType, sourceFilePath, file.name);
+    await updateInterpretRecord(record, { lastCheckpoint: "source" });
     const extraction = await extractStoredDocument(runtime, file, source, selectedInterpretPages());
     markStep("extract", "done", "interpret");
 
@@ -4053,61 +4498,8 @@ async function runInterpretation() {
     if (!text.trim()) {
       throw new Error(emptyExtractionMessage(extraction));
     }
-
-    markStep("knowledge", "active", "interpret");
-    setProgress("正在匹配公司知识库", null);
-    const knowledgeRefs = els.interpretUseKnowledge.checked
-      ? await matchKnowledge(runtime, extraction, ["第三方测评结果", "测试结果", "不符合项", "整改建议", "风险等级"])
-      : [];
-    els.interpretStatKnowledge.textContent = knowledgeRefs.length ? `${knowledgeRefs.length} 条` : "未使用";
-    markStep("knowledge", "done", "interpret");
-
-    setProgress("正在请求 LLM 解读测试结果", null);
-    els.interpretReport.textContent = "正在生成第三方测试结果解读报告。";
-    markStep("analyze", "active", "interpret");
-    const reply = await analyzeInterpretationWithLlm(extraction, knowledgeRefs);
-    const analysis = extractContent(reply);
-    els.interpretReport.innerHTML = renderMarkdown(analysis);
-    markStep("analyze", "done", "interpret");
-
-    markStep("save", "active", "interpret");
-    const extractedTextPath = `${basePath}/extracted.txt`;
-    const analysisPath = `${basePath}/analysis.md`;
-    const evidenceIndexPath = `${basePath}/evidence-index.json`;
     await writeTextFile(runtime, extractedTextPath, text);
-    await writeTextFile(runtime, analysisPath, analysis);
-    setProgress("正在压缩解读上下文", null);
-    const [analysisDigest, extractionDigest] = await Promise.all([
-      summarizeInterpretText("初始解读报告", analysis, MAX_INTERPRET_DIGEST_CHARS),
-      summarizeInterpretText("第三方测试结果抽取文本", text, MAX_INTERPRET_DIGEST_CHARS),
-    ]);
-    const evidenceIndex = buildEvidenceIndex(analysis, text);
-    await writeJsonFile(runtime, evidenceIndexPath, evidenceIndex);
-    const now = nowIso();
-    const record = {
-      id: recordId,
-      companyId: company.id,
-      projectId: project.id,
-      title: `${file.name} · ${formatDate(now)}`,
-      sourceFilePath,
-      sourceFilename: file.name,
-      sourceMimeType: contentType,
-      sourceSizeBytes: file.size,
-      extractedTextPath,
-      analysisPath,
-      analysis,
-      analysisDigest,
-      extractionDigest,
-      conversationDigest: "",
-      evidenceIndexPath,
-      evidenceIndex: {
-        path: evidenceIndexPath,
-        itemCount: evidenceIndex.items.length,
-        version: evidenceIndex.version,
-        updatedAt: evidenceIndex.createdAt,
-      },
-      evidenceIndexCache: evidenceIndex,
-      status: "已完成",
+    await updateInterpretRecord(record, {
       processedPages: extraction.kind === "archive"
         ? extraction.processed_file_count || null
         : extraction.processed_page_count || extraction.page_count || null,
@@ -4122,21 +4514,63 @@ async function runInterpretation() {
           }
         : null,
       charCount: text.length,
+      extractionTruncated: Boolean(extraction.truncated),
+      extractionWarnings: warnings,
+      lastCheckpoint: "extracted",
+    });
+
+    markStep("knowledge", "active", "interpret");
+    setProgress("正在匹配公司知识库", null);
+    const knowledgeRefs = els.interpretUseKnowledge.checked
+      ? await matchKnowledge(runtime, extraction, ["第三方测评结果", "测试结果", "不符合项", "整改建议", "风险等级"])
+      : [];
+    els.interpretStatKnowledge.textContent = knowledgeRefs.length ? `${knowledgeRefs.length} 条` : "未使用";
+    await updateInterpretRecord(record, {
       knowledgeRefs: knowledgeRefs.map((k) => ({ id: k.id, title: k.title, score: k.score })),
-      appSessionUuid: "",
-      messages: [],
-      summary: summarizeText(analysis),
-      params: {
-        maxPages: selectedInterpretPages(),
-        ocrDpi: OCR_DPI,
-        useKnowledge: els.interpretUseKnowledge.checked,
+      lastCheckpoint: "knowledge",
+    });
+    markStep("knowledge", "done", "interpret");
+
+    setProgress("正在请求 LLM 解读测试结果", null);
+    els.interpretReport.textContent = "正在生成第三方测试结果解读报告。";
+    markStep("analyze", "active", "interpret");
+    const reply = await analyzeInterpretationWithLlm(extraction, knowledgeRefs, record);
+    const analysis = reply.content || extractContent(reply);
+    els.interpretReport.innerHTML = renderMarkdown(analysis);
+    markStep("analyze", "done", "interpret");
+
+    markStep("save", "active", "interpret");
+    await writeTextFile(runtime, analysisPath, analysis);
+    setProgress("正在压缩解读上下文", null);
+    const [analysisDigest, extractionDigest] = await Promise.all([
+      summarizeInterpretText("初始解读报告", analysis, MAX_INTERPRET_DIGEST_CHARS),
+      summarizeInterpretText("第三方测试结果抽取文本", text, MAX_INTERPRET_DIGEST_CHARS),
+    ]);
+    const evidenceIndex = buildEvidenceIndex(analysis, text);
+    await writeJsonFile(runtime, evidenceIndexPath, evidenceIndex);
+    await updateInterpretRecord(record, {
+      analysis,
+      analysisDigest,
+      extractionDigest,
+      evidenceIndex: {
+        path: evidenceIndexPath,
+        itemCount: evidenceIndex.items.length,
+        version: evidenceIndex.version,
+        updatedAt: evidenceIndex.createdAt,
       },
-      createdAt: now,
-      updatedAt: now,
-    };
-    appState.interprets.unshift(record);
-    selectedInterpretId = recordId;
-    await saveStateSlice("interprets");
+      evidenceIndexCache: evidenceIndex,
+      status: "已完成",
+      completionState: "complete",
+      reportComplete: true,
+      analysisDraftAvailable: false,
+      failureStage: "",
+      failureReason: "",
+      llmFinishReason: reply?.finishReason || reply?.interpretMeta?.llmFinishReason || "",
+      retryCount: record.retryCount || 0,
+      maxRetries: INTERPRET_MAX_RETRIES,
+      summary: summarizeText(analysis),
+      lastCheckpoint: "report",
+    });
     try {
       await createInterpretSession(record);
     } catch (sessionErr) {
@@ -4164,7 +4598,27 @@ async function runInterpretation() {
     const active = document.querySelector("#interpret-steps li.active");
     if (active) active.classList.add("error");
     const failureReason = await errorWithExtractionDiagnostics(runtime, err, active);
+    const draftText = err.partialReport || record.analysis || "";
+    let draftAvailable = false;
+    if (draftText) {
+      await writeTextFile(runtime, analysisDraftPath, draftText).catch(() => analysisDraftPath);
+      draftAvailable = true;
+      record.analysis = draftText;
+    }
+    await updateInterpretRecord(record, {
+      status: "失败",
+      completionState: "failed",
+      reportComplete: false,
+      analysisDraftAvailable: draftAvailable,
+      failureStage: err.failureStage || active?.dataset?.step || "analysis",
+      failureReason,
+      llmFinishReason: err.llmFinishReason || "",
+      maxRetries: INTERPRET_MAX_RETRIES,
+    });
     els.interpretReport.textContent = `[interpret] error: ${failureReason}`;
+    if (draftText) {
+      els.interpretReport.innerHTML = renderMarkdown(`> 解读报告未完整生成，以下为已保留草稿。\n\n${draftText}`);
+    }
   } finally {
     activeWorkstream = "review";
     setBusy(false);
@@ -4428,9 +4882,13 @@ async function openInterpretRecord(id) {
   if (!record) return;
   els.interpretReport.textContent = "正在读取解读归档。";
   try {
-    const analysis = await readTextFile(runtime, record.analysisPath);
+    const path = interpretReportPath(record) || record.analysisDraftPath || record.analysisPath;
+    const analysis = path ? await readTextFile(runtime, path) : record.analysis || "";
     record.analysis = analysis;
-    els.interpretReport.innerHTML = renderMarkdown(analysis || "暂无解读报告。");
+    const notice = record.reportComplete === false
+      ? `> 当前解读报告未完整生成。阶段：${record.failureStage || "-"}；原因：${record.failureReason || "-"}\n\n`
+      : "";
+    els.interpretReport.innerHTML = renderMarkdown(`${notice}${analysis || "暂无解读报告。"}`);
   } catch (err) {
     els.interpretReport.textContent = formatError("interpret.read", err);
   }
@@ -4450,6 +4908,7 @@ async function deleteInterpretRecord(id = selectedInterpretId) {
     deleteFileQuietly(runtime, record.sourceFilePath),
     deleteFileQuietly(runtime, record.extractedTextPath),
     deleteFileQuietly(runtime, record.analysisPath),
+    deleteFileQuietly(runtime, record.analysisDraftPath),
     deleteFileQuietly(runtime, record.evidenceIndexPath || record.evidenceIndex?.path),
   ]);
   renderInterpretList();
@@ -4459,13 +4918,14 @@ async function deleteInterpretRecord(id = selectedInterpretId) {
 async function downloadInterpretReport(id = selectedInterpretId) {
   const runtime = await annaReady;
   const record = appState.interprets.find((r) => r.id === id);
-  if (!record?.analysisPath) return;
-  if (localFileStore.has(record.analysisPath)) {
-    await downloadLocalFile(record.analysisPath, `${sanitizeFilename(record.title)}.md`);
+  const path = interpretReportPath(record);
+  if (!path) return;
+  if (localFileStore.has(path)) {
+    await downloadLocalFile(path, `${sanitizeFilename(record.title)}.md`);
     return;
   }
   await runtime.files.download({
-    path: record.analysisPath,
+    path,
     filename: `${sanitizeFilename(record.title)}.md`,
   });
 }
